@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import unicodedata
+from collections.abc import Sequence
 from pathlib import Path
 
 import litellm
@@ -892,7 +893,111 @@ def _resolve_description(fm: dict) -> str:
     return ""
 
 
-def _read_concept_briefs(wiki_dir: Path) -> str:
+DEFAULT_BRIEFS_BUDGET_CHARS = 120_000
+"""Per-list character cap for the concept/entity briefs in the plan prompt.
+
+Roughly 30k tokens each, so a KB has to grow well past a few hundred pages
+before anything is trimmed — the cap is a ceiling against unbounded growth, not
+a working limit. Overridable with the ``briefs_budget_chars`` config key; set it
+to 0 to restore the previous uncapped behavior.
+
+Why a cap at all: ``_read_concept_briefs`` and ``_read_entity_briefs`` read
+*every* page in the KB and the result is rebuilt into the plan prompt for each
+compiled document. The size is therefore O(KB), and a large KB eventually
+exceeds the model's context window — which surfaces as a hard failure partway
+through a recompile, not as degraded output.
+"""
+
+
+def _resolve_briefs_budget(config: dict) -> int:
+    """Read ``briefs_budget_chars`` from config, falling back to the default.
+
+    A non-integer or negative value falls back rather than raising: a typo in a
+    config file should not abort a compile, and a negative budget has no sane
+    reading. ``0`` is meaningful and passes through — it disables trimming.
+    """
+    raw = config.get("briefs_budget_chars", DEFAULT_BRIEFS_BUDGET_CHARS)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        logger.warning(
+            "briefs_budget_chars=%r is not a non-negative integer — using %d",
+            raw,
+            DEFAULT_BRIEFS_BUDGET_CHARS,
+        )
+        return DEFAULT_BRIEFS_BUDGET_CHARS
+    return raw
+
+
+def _n_sources(fm_dict: dict) -> int:
+    """How many documents a page cites, from its ``sources:`` frontmatter list.
+
+    This is the cross-document recurrence signal already used in the entity
+    brief line. It doubles as the salience ranking when the brief list has to
+    be trimmed to fit a budget: a concept seen in many documents is the one the
+    planner most needs to know about, because it is the one most likely to be
+    updated rather than created.
+    """
+    sources = fm_dict.get("sources")
+    return len(sources) if isinstance(sources, list) else 0
+
+
+def _fit_briefs(
+    ranked: list[tuple[int, str]], budget_chars: int, noun: str, pending_lines: Sequence[str] = ()
+) -> str:
+    """Join brief lines under a character budget, ranked by salience.
+
+    ``ranked`` is ``[(n_sources, line), ...]``. Existing pages come first,
+    most-cited first and then alphabetically (the caller sorts). Pending topics
+    follow in buffer order and share the same budget.
+
+    **The truncation is announced in the returned text.** A shortened list that
+    looks complete is worse than a long one: the planner reads these briefs to
+    decide create-vs-update, so a silently dropped concept comes back as a
+    duplicate page for something the KB already has. The trailing marker tells
+    the model the list is partial, so "not listed" stops meaning "not present".
+
+    A budget of 0 or less disables trimming, which keeps the previous behavior
+    available for callers that want the full list.
+    """
+    lines = [line for _, line in ranked]
+    lines.extend(pending_lines)
+    if budget_chars <= 0:
+        return "\n".join(lines) or "(none yet)"
+
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > budget_chars:
+            break
+        kept.append(line)
+        used += len(line) + 1
+
+    dropped = len(lines) - len(kept)
+    if not dropped:
+        return "\n".join(kept) or "(none yet)"
+    if not kept:
+        # Budget smaller than a single line. Say so rather than return an empty
+        # list that reads like an empty KB.
+        return f"(list omitted: {len(lines)} {noun} exceed the brief budget)"
+
+    logger.info(
+        "brief list trimmed to fit budget: kept %d of %d %s (%d chars)",
+        len(kept),
+        len(lines),
+        noun,
+        budget_chars,
+    )
+    kept_prefix = f"{len(kept)} most-cited" if len(kept) <= len(ranked) else f"first {len(kept)}"
+    kept.append(
+        f"- (… {dropped} more {noun} not listed — this list is truncated to the "
+        f"{kept_prefix}; absence here does NOT mean the page is "
+        f"missing, so prefer 'update' over 'create' when unsure)"
+    )
+    return "\n".join(kept)
+
+
+def _read_concept_briefs(
+    wiki_dir: Path, budget_chars: int = 0, *, pending_lines: Sequence[str] = ()
+) -> str:
     """Read existing concept pages and return compact one-line summaries.
 
     For each concept, reads the ``description:`` field (falling back to legacy
@@ -900,18 +1005,17 @@ def _read_concept_briefs(wiki_dir: Path) -> str:
     truncating the first 150 chars of the body (newlines collapsed to spaces).
     Formats each as ``- {slug}: {description}``.
 
-    Returns "(none yet)" if the concepts directory is missing or empty.
+    With ``budget_chars`` > 0 the list is capped at that many characters, most-
+    cited concepts first (see :func:`_fit_briefs`). The cap exists because this
+    list grows with the KB and lands in the plan prompt on every compiled
+    document: an unbounded list eventually exceeds the model's context window,
+    and the failure arrives as a hard error mid-compile rather than as degraded
+    output.
+
+    Returns "(none yet)" if there are no existing or pending briefs.
     """
-    concepts_dir = wiki_dir / "concepts"
-    if not concepts_dir.exists():
-        return "(none yet)"
-
-    md_files = sorted(concepts_dir.glob("*.md"))
-    if not md_files:
-        return "(none yet)"
-
-    lines: list[str] = []
-    for path in md_files:
+    ranked: list[tuple[int, str]] = []
+    for path in sorted((wiki_dir / "concepts").glob("*.md")):
         text = path.read_text(encoding="utf-8")
         fm_dict = frontmatter.parse(text)
         brief = _resolve_description(fm_dict)
@@ -920,56 +1024,41 @@ def _read_concept_briefs(wiki_dir: Path) -> str:
             body = parts[1] if parts is not None else text
             brief = body.strip().replace("\n", " ")[:150]
         if brief:
-            lines.append(f"- {path.stem}: {brief}")
+            ranked.append((_n_sources(fm_dict), f"- {path.stem}: {brief}"))
 
-    return "\n".join(lines) or "(none yet)"
+    # Most-cited first; alphabetical within a tier so the prompt stays stable
+    # across runs (prompt caching depends on byte-identical prefixes).
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return _fit_briefs(ranked, budget_chars, "concepts", pending_lines)
 
 
-def _read_entity_briefs(wiki_dir: Path) -> str:
+def _read_entity_briefs(
+    wiki_dir: Path, budget_chars: int = 0, *, pending_lines: Sequence[str] = ()
+) -> str:
     """Read existing entity pages as compact lines for the plan call.
 
     Formats each as ``- {slug} ({type}, {n} sources) — {brief}``. The source
     count is the cross-document recurrence signal the LLM uses to decide
-    create-vs-update and salience. Returns "(none yet)" when empty.
+    create-vs-update and salience — and, with ``budget_chars`` > 0, the ranking
+    used to decide what stays when the list is capped. Returns "(none yet)"
+    if there are no existing or pending briefs.
     """
-    entities_dir = wiki_dir / "entities"
-    if not entities_dir.exists():
-        return "(none yet)"
-
-    md_files = sorted(entities_dir.glob("*.md"))
-    if not md_files:
-        return "(none yet)"
-
-    lines: list[str] = []
-    for path in md_files:
+    ranked: list[tuple[int, str]] = []
+    for path in sorted((wiki_dir / "entities").glob("*.md")):
         text = path.read_text(encoding="utf-8")
         fm_dict = frontmatter.parse(text)
         brief = _resolve_description(fm_dict)
         etype = str(fm_dict.get("type") or "").strip().lower() or "other"
-        n_sources = len(fm_dict["sources"]) if isinstance(fm_dict.get("sources"), list) else 0
+        n_sources = _n_sources(fm_dict)
         if not brief:
             parts = frontmatter.split(text)
             body = parts[1] if parts is not None else text
             brief = body.strip().replace("\n", " ")[:150]
         suffix = f" — {brief}" if brief else ""
-        lines.append(f"- {path.stem} ({etype}, {n_sources} sources){suffix}")
+        ranked.append((n_sources, f"- {path.stem} ({etype}, {n_sources} sources){suffix}"))
 
-    return "\n".join(lines) or "(none yet)"
-
-
-def _combine_briefs(existing_briefs: str, pending_store: "PendingTopicsStore", kind: str) -> str:
-    """Append pending-topic brief lines (see ``openkb.pending``) to the
-    existing-page briefs fed to the plan call, so the LLM treats a pending
-    topic like a quasi-existing page for dedup ("prefer update"/"related"
-    over proposing a near-duplicate create). Pending slugs are NOT added to
-    the wikilink whitelist elsewhere — no real page exists for them yet.
-    """
-    pending_lines = pending_store.brief_lines(kind)
-    if not pending_lines:
-        return existing_briefs
-    if existing_briefs == "(none yet)":
-        return "\n".join(pending_lines)
-    return existing_briefs + "\n" + "\n".join(pending_lines)
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return _fit_briefs(ranked, budget_chars, "entities", pending_lines)
 
 
 def _iter_h2_headings(lines: list[str]) -> list[tuple[int, str]]:
@@ -1802,6 +1891,7 @@ async def _compile_concepts(
     concept_update_mode: str = "rewrite",
     strict_item_mode: bool = False,
     doc_tokens: int | None = None,
+    briefs_budget_chars: int | None = None,
     bundle=None,
 ) -> None:
     """Shared Steps 2-4: concepts plan → generate/update → index.
@@ -1831,11 +1921,18 @@ async def _compile_concepts(
     valid_types = frozenset(entity_types)
 
     # --- Step 2: Get concepts plan (A cached) ---
-    # Pending-topics buffer (issue #247): instantiated once here and reused
-    # below (repartition + task-building) — see PendingTopicsStore docstring.
+    # Reuse the pending buffer for planning, repartition, and task-building.
     pending_store = PendingTopicsStore(kb_dir / ".openkb" / "pending_topics.json")
-    concept_briefs = _combine_briefs(_read_concept_briefs(wiki_dir), pending_store, "concepts")
-    entity_briefs = _combine_briefs(_read_entity_briefs(wiki_dir), pending_store, "entities")
+    if briefs_budget_chars is None:
+        briefs_budget_chars = DEFAULT_BRIEFS_BUDGET_CHARS
+    # Each category shares one budget. Pending entries help the planner
+    # deduplicate and stay out of the wikilink whitelist until promoted.
+    concept_briefs = _read_concept_briefs(
+        wiki_dir, briefs_budget_chars, pending_lines=pending_store.brief_lines("concepts")
+    )
+    entity_briefs = _read_entity_briefs(
+        wiki_dir, briefs_budget_chars, pending_lines=pending_store.brief_lines("entities")
+    )
 
     # Second cache breakpoint: end of the assistant summary message. Covers
     # (system + doc + summary) for the plan call and every concept call.
@@ -2811,6 +2908,7 @@ async def compile_short_doc(
     config = resolve_effective_config(kb_dir)[0]
     language: str = config.get("language", "en")
     entity_types = resolve_entity_types(config)
+    briefs_budget = _resolve_briefs_budget(config)
 
     wiki_dir = kb_dir / "wiki"
     schema_md = get_agents_md(wiki_dir)
@@ -2877,6 +2975,7 @@ async def compile_short_doc(
             concept_update_mode=resolve_concept_update_mode(config),
             strict_item_mode=resolve_strict_item_mode(config),
             doc_tokens=doc_tokens,
+            briefs_budget_chars=briefs_budget,
             bundle=bundle,
         )
     finally:
@@ -2909,6 +3008,7 @@ async def compile_long_doc(
     config = resolve_effective_config(kb_dir)[0]
     language: str = config.get("language", "en")
     entity_types = resolve_entity_types(config)
+    briefs_budget = _resolve_briefs_budget(config)
 
     wiki_dir = kb_dir / "wiki"
     schema_md = get_agents_md(wiki_dir)
@@ -2976,6 +3076,7 @@ async def compile_long_doc(
             concept_update_mode=resolve_concept_update_mode(config),
             strict_item_mode=resolve_strict_item_mode(config),
             doc_tokens=doc_tokens,
+            briefs_budget_chars=briefs_budget,
             bundle=bundle,
         )
     finally:

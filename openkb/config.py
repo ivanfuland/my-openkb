@@ -44,6 +44,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # resolve_strict_item_mode(). KB config.yaml only, not in
     # GLOBAL_SCALAR_KEYS (same treatment as concept_update_mode above).
     "strict_item_mode": False,
+    # Per-list character cap for the concept/entity briefs in the compile plan
+    # prompt. Those lists are O(KB) and are rebuilt for every compiled document,
+    # so without a ceiling a large KB eventually exceeds the model's context
+    # window mid-recompile. 0 disables trimming.
+    "briefs_budget_chars": 120_000,
 }
 
 VALID_CONCEPT_UPDATE_MODES: tuple[str, ...] = ("rewrite", "append")
