@@ -56,6 +56,7 @@ from openkb.config import (
     load_global_config,
     register_kb,
     resolve_concept_update_mode,
+    resolve_consolidate_model,
     resolve_concurrency,
     set_extra_headers,
     resolve_parallel_tool_calls,
@@ -146,7 +147,7 @@ def _apply_litellm_settings(settings: dict) -> None:
         setattr(litellm, key, value)
 
 
-def _setup_llm_key(kb_dir: Path | None = None) -> None:
+def _setup_llm_key(kb_dir: Path | None = None, *, model_override: str | None = None) -> None:
     """Set LiteLLM API key from LLM_API_KEY env var if present.
 
     Load order (override=False, so first one wins):
@@ -156,8 +157,9 @@ def _setup_llm_key(kb_dir: Path | None = None) -> None:
 
     Also propagates to provider-specific env vars (OPENAI_API_KEY, etc.)
     so that the Agents SDK litellm provider can pick them up.
-    Provider is auto-detected from the KB config when available; otherwise
-    a common provider set is used as a fallback.
+    When a KB is supplied, pass ``model_override`` if the command selects its
+    own model so credential setup follows the provider the command will use.
+    Without a KB, key checks use a common provider set.
     """
     if kb_dir is not None:
         env_file = kb_dir / ".env"
@@ -181,14 +183,16 @@ def _setup_llm_key(kb_dir: Path | None = None) -> None:
     parallel_tool_calls_explicit = False
     litellm_settings: dict = {}
     if kb_dir is not None:
-        # Resolve model the same way the command bodies do (DEFAULT -> global.yaml
-        # -> KB config.yaml) so provider extraction sees the effective, global-
-        # layered model. Reading KB config.yaml alone would miss a global-only
-        # default model (or fall back to DEFAULT_CONFIG's model) and derive the
-        # wrong provider. resolve_effective_config handles a missing config.yaml
-        # internally, so no config_path.exists() gate is needed.
+        # Resolve layered KB settings even when the caller supplies the model.
+        # Without an override, reading KB config.yaml alone would miss a
+        # global-only model and could select the wrong provider. The effective
+        # config also handles a missing config.yaml.
         config = resolve_effective_config(kb_dir)[0]
-        model = config.get("model", DEFAULT_CONFIG["model"])
+        model = (
+            model_override
+            if model_override is not None
+            else config.get("model", DEFAULT_CONFIG["model"])
+        )
         provider = _extract_provider(str(model))
         extra_headers, timeout, litellm_settings = resolve_per_request_overrides(config)
         parallel_tool_calls, parallel_tool_calls_explicit = resolve_parallel_tool_calls(config)
@@ -2151,9 +2155,9 @@ def consolidate(ctx, page_name, all_pages, min_notes, dry_run, yes):
             click.echo("Aborted.")
             return
 
-    _setup_llm_key(kb_dir)
     config = resolve_effective_config(kb_dir)[0]
-    model: str = config.get("model", DEFAULT_CONFIG["model"])
+    model: str = resolve_consolidate_model(config)
+    _setup_llm_key(kb_dir, model_override=model)
     language: str = config.get("language", "en")
     max_concurrency = resolve_concurrency(config) or DEFAULT_COMPILE_CONCURRENCY
 

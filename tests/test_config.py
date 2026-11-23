@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from openkb.compiler_config import DEFAULT_MODEL
 from openkb.config import (
     DEFAULT_CONFIG,
     GLOBAL_SCALAR_KEYS,
@@ -14,6 +15,7 @@ from openkb.config import (
     registered_kbs,
     resolve_concept_update_mode,
     resolve_concurrency,
+    resolve_consolidate_model,
     resolve_effective_config,
     resolve_extra_headers,
     resolve_init_kb_dir,
@@ -213,6 +215,75 @@ def test_resolve_strict_item_mode_rejects_non_bool(caplog):
     assert result is True
     assert "'strict_item_mode' must be a bool" in caplog.text
     assert "using True." in caplog.text
+
+
+def test_consolidate_model_default_in_config():
+    assert DEFAULT_CONFIG["model"] == DEFAULT_MODEL
+
+
+def test_consolidate_model_not_in_default_config():
+    # Optional override only — resolve_consolidate_model reads it via .get(),
+    # so an absent key means "use model" without a DEFAULT_CONFIG entry.
+    assert "consolidate_model" not in DEFAULT_CONFIG
+
+
+def test_consolidate_model_not_in_global_scalar_keys():
+    # KB config.yaml only (like concept_update_mode/strict_item_mode) — not
+    # workbench/global-editable.
+    assert "consolidate_model" not in GLOBAL_SCALAR_KEYS
+
+
+def test_resolve_consolidate_model_unset_uses_model():
+    assert resolve_consolidate_model({"model": "openai/gpt-4o"}) == "openai/gpt-4o"
+
+
+def test_resolve_consolidate_model_unset_and_no_model_uses_default():
+    assert resolve_consolidate_model({}) == DEFAULT_MODEL
+
+
+def test_resolve_consolidate_model_unset_with_blank_model_uses_default():
+    assert resolve_consolidate_model({"model": "   "}) == DEFAULT_MODEL
+    assert resolve_consolidate_model({"model": None}) == DEFAULT_MODEL
+
+
+def test_resolve_consolidate_model_explicit_none_is_silent(caplog):
+    with caplog.at_level(logging.WARNING, logger="openkb.config"):
+        result = resolve_consolidate_model({"model": "openai/gpt-4o", "consolidate_model": None})
+    assert result == "openai/gpt-4o"
+    assert caplog.text == ""
+
+
+def test_resolve_consolidate_model_valid_override():
+    config = {"model": "openai/gpt-4o", "consolidate_model": "anthropic/claude-sonnet-4-5"}
+    assert resolve_consolidate_model(config) == "anthropic/claude-sonnet-4-5"
+
+
+def test_resolve_consolidate_model_trims_whitespace():
+    config = {"model": "  openai/gpt-4o  ", "consolidate_model": "  anthropic/claude-sonnet-4-5\n"}
+    assert resolve_consolidate_model(config) == "anthropic/claude-sonnet-4-5"
+    assert resolve_consolidate_model({"model": "  openai/gpt-4o  "}) == "openai/gpt-4o"
+
+
+def test_resolve_consolidate_model_blank_string_warns_and_falls_back(caplog):
+    for blank in ("", "   "):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="openkb.config"):
+            result = resolve_consolidate_model(
+                {"model": "openai/gpt-4o", "consolidate_model": blank}
+            )
+        assert result == "openai/gpt-4o"
+        assert "'consolidate_model' must be a non-empty string" in caplog.text
+        assert "using 'openai/gpt-4o'." in caplog.text
+
+
+@pytest.mark.parametrize("bad_value", [1, True, False, ["openai/gpt-4o"], {"model": "x"}, 1.5])
+def test_resolve_consolidate_model_non_string_warns_and_falls_back(caplog, bad_value):
+    with caplog.at_level(logging.WARNING, logger="openkb.config"):
+        result = resolve_consolidate_model(
+            {"model": "openai/gpt-4o", "consolidate_model": bad_value}
+        )
+    assert result == "openai/gpt-4o"
+    assert "'consolidate_model' must be a non-empty string" in caplog.text
 
 
 def test_load_concurrency_override(tmp_path):
