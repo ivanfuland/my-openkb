@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from openkb.agent.compiler import remove_doc_from_concept_pages, remove_doc_from_entity_pages
 from openkb.agent.compiler_notes import (
     _NOTES_HEADING,
     _upsert_note_line,
@@ -28,6 +31,20 @@ class TestNoteFields:
         assert note_fields("[1, 2, 3]") == ("", "")
 
 
+_OUTSIDE_BEFORE = "# Topic\n\n- **Archive** Quoted. ([[summaries/doc]])\n\n"
+_NOTES_START = "## Notes\n\n"
+_OLD_SINGLE = "- **2026-11-01** Old single line. ([[summaries/doc]])\n"
+_OLD_MULTILINE = "- **2026-11-02** Old start.\n\nLegacy continuation.\n  ([[summaries/doc]])  \n"
+_SIBLING = (
+    "- **2026-11-03** Sibling mentions ([[summaries/doc]]) here.\n"
+    "Its own source. ([[summaries/doc-other]])\n"
+)
+_OUTSIDE_AFTER = "\n### Examples\n\n- **Example** Quoted. ([[summaries/doc]])\n"
+_LEGACY_BODY = (
+    _OUTSIDE_BEFORE + _NOTES_START + _OLD_MULTILINE + _SIBLING + _OLD_SINGLE + _OUTSIDE_AFTER
+)
+
+
 class TestUpsertNoteLine:
     def test_seeds_heading_and_inserts_first_note(self):
         body = _upsert_note_line(f"{_NOTES_HEADING}\n\n", "jira-1", "First note.")
@@ -52,6 +69,18 @@ class TestUpsertNoteLine:
         assert any("Updated text." in ln for ln in note_lines)
         assert not any("Old text." in ln for ln in note_lines)
 
+    def test_replaces_legacy_entries_and_flattens_new_note(self):
+        result = _upsert_note_line(
+            _LEGACY_BODY, "doc", "  New first line.\r\n\n\tNew second line.\n", date="2026-11-04"
+        )
+        assert result == (
+            _OUTSIDE_BEFORE
+            + _NOTES_START
+            + "- **2026-11-04** New first line. New second line. ([[summaries/doc]])\n"
+            + _SIBLING
+            + _OUTSIDE_AFTER
+        )
+
     def test_creates_missing_heading(self):
         body = _upsert_note_line("Some unrelated body.", "jira-1", "A note.")
         assert body.split("\n") == [
@@ -61,6 +90,28 @@ class TestUpsertNoteLine:
             "",
             f"- **{_today()}** A note. ([[summaries/jira-1]])",
         ]
+
+
+@pytest.mark.parametrize(
+    ("page_dir", "remove"),
+    [("concepts", remove_doc_from_concept_pages), ("entities", remove_doc_from_entity_pages)],
+)
+def test_remove_doc_strips_only_its_notes(tmp_path, page_dir, remove):
+    page = tmp_path / page_dir / "topic.md"
+    page.parent.mkdir()
+    page.write_text(
+        '---\nsources: ["summaries/doc.md", "summaries/doc-other.md"]\n---\n\n' + _LEGACY_BODY,
+        encoding="utf-8",
+    )
+
+    assert remove(tmp_path, "doc") == {"modified": ["topic"], "deleted": []}
+    assert page.read_text(encoding="utf-8") == (
+        '---\nsources: ["summaries/doc-other.md"]\n---\n\n'
+        + _OUTSIDE_BEFORE
+        + _NOTES_START
+        + _SIBLING
+        + _OUTSIDE_AFTER
+    )
 
 
 class TestAppendConceptNote:

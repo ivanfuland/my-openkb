@@ -103,6 +103,51 @@ def test_recompile_short_dispatches_compile_short_doc(kb_dir):
     assert "recompiled 1" in result.output
 
 
+def test_recompile_replaces_both_note_formats_on_concept_and_entity_pages(kb_dir, monkeypatch):
+    _seed_short(kb_dir)
+    topic_paths = []
+    for page_dir in ("concepts", "entities"):
+        topic = kb_dir / "wiki" / page_dir / "topic.md"
+        topic.parent.mkdir(exist_ok=True)
+        topic.write_text(
+            '---\nsources: ["summaries/notes-h_s.md", "summaries/other.md"]\n---\n\n'
+            "# Topic\n\n## Notes\n\n"
+            "- **2026-01-01** Legacy first line.\n\nLegacy continuation.\n"
+            "([[summaries/notes-h_s]])\n"
+            "- **2026-01-02** Old single line. ([[summaries/notes-h_s]])\n"
+            "- **2026-01-03** Sibling note. ([[summaries/other]])\n\n"
+            "## Examples\n\nPreserve this section.\n",
+            encoding="utf-8",
+        )
+        topic_paths.append(topic)
+    plan = {group: {"update": [{"name": "topic"}]} for group in ("concepts", "entities")}
+    monkeypatch.setattr(
+        compiler,
+        "_llm_call",
+        lambda _model, _messages, step, **_: json.dumps(
+            plan if step == "concepts-plan" else {"content": "Summary."}
+        ),
+    )
+    generate_note = AsyncMock(return_value=json.dumps({"note": "New first line.\nSecond line."}))
+    monkeypatch.setattr(compiler, "_llm_call_page_async", generate_note)
+
+    result = _invoke(kb_dir, ["recompile", "notes.md"])
+
+    assert result.exit_code == 0, result.output
+    assert "recompiled 1" in result.output
+    assert generate_note.await_count == 2
+    for topic in topic_paths:
+        text = topic.read_text(encoding="utf-8")
+        assert text.count("([[summaries/notes-h_s]])") == 1
+        assert "New first line. Second line. ([[summaries/notes-h_s]])\n" in text
+        assert "Legacy" not in text
+        assert "Old single line." not in text
+        assert text.endswith(
+            "- **2026-01-03** Sibling note. ([[summaries/other]])\n\n"
+            "## Examples\n\nPreserve this section.\n"
+        )
+
+
 # ---------------------------------------------------------------------------
 # long-doc dispatch
 # ---------------------------------------------------------------------------

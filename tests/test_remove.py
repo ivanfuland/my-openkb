@@ -520,7 +520,9 @@ def test_cli_remove_rolls_back_pages_that_reference_doc_only_in_body(kb_dir):
         encoding="utf-8",
     )
     entity.write_text(
-        "## Notes\n- **2026-01-01** Quoted note. ([[summaries/attention-h_a]])\n\n"
+        "## Notes\n- **2026-01-01** Quoted note. ([[summaries/attention-h_a]])\n"
+        "- **2026-01-02** Legacy note.\n\nAnother paragraph.\n"
+        "([[summaries/attention-h_a]])\n\n"
         "A [[missing-page|reference]].\n",
         encoding="utf-8",
     )

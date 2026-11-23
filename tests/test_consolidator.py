@@ -50,6 +50,13 @@ class TestSplitNotesAndCount:
         assert existing == "# Attention\n\nSome prose."
         assert "A note." in notes
 
+    def test_legacy_note_counts_once_and_ends_at_next_heading(self):
+        note = "- **2026-01-01** First line.\n\nAnother paragraph.\n([[summaries/a]])"
+        examples = "## Examples\n\n- **Example** An unrelated bullet."
+        body = f"# Topic\n\n## Notes\n\n{note}\n\n{examples}"
+        assert _split_notes(body) == (f"# Topic\n\n{examples}", note)
+        assert count_pending_notes(body) == 1
+
     def test_count_pending_notes_zero_without_heading(self):
         assert count_pending_notes("# Attention\n\nSome prose.") == 0
 

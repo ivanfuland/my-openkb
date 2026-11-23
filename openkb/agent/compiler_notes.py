@@ -15,6 +15,7 @@ import datetime
 import json
 import logging
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 from openkb import frontmatter
@@ -23,6 +24,9 @@ from openkb.locks import atomic_write_text
 logger = logging.getLogger(__name__)
 
 _NOTES_HEADING = "## Notes"
+_NOTE_BULLET = "- **"
+_ATX_HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
+_NOTE_SOURCE_SUFFIX = re.compile(r"\(\[\[summaries/([^\]]+)\]\]\)[ \t]*$")
 
 # ---------------------------------------------------------------------------
 # Prompt templates — deliberately slim: no existing page content, no wikilink
@@ -109,27 +113,60 @@ def note_fields(raw: str) -> tuple[str, str]:
     )
 
 
+def _notes_section_bounds(
+    lines: list[str], heading: str = _NOTES_HEADING
+) -> Iterator[tuple[int, int]]:
+    """Yield the heading index and exclusive end of each Notes section."""
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip() == heading:
+            if start is not None:
+                yield start, i
+            start = i
+        elif start is not None and _ATX_HEADING.match(line.rstrip("\r\n")):
+            yield start, i
+            start = None
+    if start is not None:
+        yield start, len(lines)
+
+
+def remove_doc_notes(body: str, doc_name: str, heading: str = _NOTES_HEADING) -> str:
+    """Remove this source's dated bullets and their legacy continuation lines."""
+    lines = body.splitlines(keepends=True)
+    kept: list[str] = []
+    kept_from = 0
+    for start, end in _notes_section_bounds(lines, heading):
+        note_start = None
+        for i in range(start + 1, end):
+            line = lines[i]
+            if line.lstrip().startswith(_NOTE_BULLET):
+                note_start = i
+            if note_start is None:
+                continue
+            marker = _NOTE_SOURCE_SUFFIX.search(line.rstrip("\r\n"))
+            if marker is None:
+                continue
+            if marker[1] == doc_name:
+                kept.extend(lines[kept_from:note_start])
+                kept_from = i + 1
+            # A source suffix closes the bullet, even for a different doc.
+            note_start = None
+    kept.extend(lines[kept_from:])
+    return "".join(kept)
+
+
 def _upsert_note_line(
     body: str, doc_name: str, note: str, heading: str = _NOTES_HEADING, *, date: str | None = None
 ) -> str:
-    """Insert/replace the note line for ``doc_name`` right after ``heading``.
-
-    Keyed by the ``[[summaries/{doc_name}]]`` source marker (not the note
-    text), so re-ingesting an updated version of the same document replaces
-    its own line instead of accumulating duplicates. New/replaced lines land
-    directly after the heading — newest first, matching the ``sources:``
-    frontmatter convention.
-    """
+    """Replace the source's notes with one single-line entry, newest first."""
     marker = f"[[summaries/{doc_name}]]"
     date = date or datetime.date.today().isoformat()
+    note = " ".join(part for line in note.splitlines() if (part := line.strip()))
     line = f"- **{date}** {note} ({marker})"
 
-    lines = body.split("\n")
-    line_re = re.compile(rf"^- \*\*.*\({re.escape(marker)}\)\s*$")
-    lines = [ln for ln in lines if not line_re.match(ln)]
-
-    heading_idx = next((i for i, ln in enumerate(lines) if ln.strip() == heading), None)
-    if heading_idx is None:
+    lines = remove_doc_notes(body, doc_name, heading).split("\n")
+    section = next(_notes_section_bounds(lines, heading), None)
+    if section is None:
         while lines and lines[-1].strip() == "":
             lines.pop()
         if lines:
@@ -138,7 +175,7 @@ def _upsert_note_line(
         lines.append("")
         lines.append(line)
     else:
-        insert_at = heading_idx + 1
+        insert_at = section[0] + 1
         if insert_at < len(lines) and lines[insert_at].strip() == "":
             insert_at += 1
         lines.insert(insert_at, line)

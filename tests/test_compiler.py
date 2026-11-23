@@ -2389,7 +2389,8 @@ class TestCompileConceptsPlan:
                 5,
                 concept_update_mode="rewrite",
             )
-            assert mock_litellm.acompletion.await_count == 2
+            # One pending note, then both attempts at generating the full page.
+            assert mock_litellm.acompletion.await_count == 3
 
         # The concept page must NOT be written (generation raised + dropped).
         page = wiki / "concepts" / "ghost-concept.md"

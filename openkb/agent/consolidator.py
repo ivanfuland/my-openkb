@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from openkb import frontmatter
-from openkb.agent.compiler_notes import _NOTES_HEADING
+from openkb.agent.compiler_notes import _NOTE_BULLET, _notes_section_bounds
 from openkb.lint import list_existing_wiki_targets, strip_ghost_wikilinks
 from openkb.locks import atomic_write_text
 from openkb.mutation import snapshot_paths
@@ -82,22 +82,23 @@ def _split_notes(body: str) -> tuple[str, str]:
     ``notes_content`` is empty when there is no ``## Notes`` heading (nothing
     pending) — callers treat that as "skip, no notes to consolidate".
     """
-    lines = body.split("\n")
-    idx = next((i for i, ln in enumerate(lines) if ln.strip() == _NOTES_HEADING), None)
-    if idx is None:
-        return body.strip(), ""
-    existing = "\n".join(lines[:idx]).strip()
-    notes = "\n".join(lines[idx + 1 :]).strip()
-    return existing, notes
+    lines = body.splitlines(keepends=True)
+    prose: list[str] = []
+    notes: list[str] = []
+    prose_from = 0
+    for start, end in _notes_section_bounds(lines):
+        prose.extend(lines[prose_from:start])
+        notes.append("".join(lines[start + 1 : end]).strip())
+        prose_from = end
+    prose.extend(lines[prose_from:])
+    return "".join(prose).strip(), "\n\n".join(filter(None, notes))
 
 
 def count_pending_notes(text: str) -> int:
-    """Count ``## Notes`` bullet lines in a page's raw text (0 if none)."""
+    """Count pending note entries, including legacy multiline bullets."""
     parts = frontmatter.split(text)
     _, notes = _split_notes(parts[1] if parts is not None else text)
-    if not notes:
-        return 0
-    return sum(1 for ln in notes.split("\n") if ln.lstrip().startswith("- **"))
+    return sum(1 for ln in notes.splitlines() if ln.lstrip().startswith(_NOTE_BULLET))
 
 
 def find_consolidation_candidates(wiki_dir: Path, min_notes: int = 1) -> list[tuple[str, str, int]]:
