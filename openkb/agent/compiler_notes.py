@@ -103,10 +103,15 @@ def note_fields(raw: str) -> tuple[str, str]:
         return "", raw.strip()
     if obj is None:
         return "", ""
-    return obj.get("description", ""), (obj.get("note") or "").strip()
+    note = obj.get("note")
+    return frontmatter.single_line_description(obj.get("description")), (
+        note.strip() if isinstance(note, str) else ""
+    )
 
 
-def _upsert_note_line(body: str, doc_name: str, note: str, heading: str = _NOTES_HEADING) -> str:
+def _upsert_note_line(
+    body: str, doc_name: str, note: str, heading: str = _NOTES_HEADING, *, date: str | None = None
+) -> str:
     """Insert/replace the note line for ``doc_name`` right after ``heading``.
 
     Keyed by the ``[[summaries/{doc_name}]]`` source marker (not the note
@@ -116,7 +121,7 @@ def _upsert_note_line(body: str, doc_name: str, note: str, heading: str = _NOTES
     frontmatter convention.
     """
     marker = f"[[summaries/{doc_name}]]"
-    date = datetime.date.today().isoformat()
+    date = date or datetime.date.today().isoformat()
     line = f"- **{date}** {note} ({marker})"
 
     lines = body.split("\n")

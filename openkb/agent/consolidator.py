@@ -14,7 +14,8 @@ from openkb import frontmatter
 from openkb.agent.compiler_notes import _NOTES_HEADING
 from openkb.lint import list_existing_wiki_targets, strip_ghost_wikilinks
 from openkb.locks import atomic_write_text
-from openkb.schema import get_agents_md
+from openkb.mutation import snapshot_paths
+from openkb.schema import INDEX_SEED, get_agents_md
 
 logger = logging.getLogger(__name__)
 
@@ -153,16 +154,14 @@ async def consolidate_page(
 
     path = wiki_dir / page_dir / f"{slug}.md"
     text = path.read_text(encoding="utf-8")
+    fm = frontmatter.parse_required(text)
     parts = frontmatter.split(text)
-    if parts is None:
-        logger.warning("Skipping %s/%s: malformed or missing frontmatter.", page_dir, slug)
-        return False
+    assert parts is not None  # parse_required checked the delimiters
     fm_block, body = parts
     existing_content, notes_content = _split_notes(body.lstrip("\n"))
     if not notes_content:
         return False
 
-    fm = frontmatter.parse(text)
     title = _title_from_slug(slug)
     known_targets = list_existing_wiki_targets(wiki_dir)
     known_targets_str = _compiler._format_known_targets(known_targets)
@@ -193,18 +192,16 @@ async def consolidate_page(
             notes_content=notes_content,
         )
 
-    raw = await _compiler._llm_call_async(
+    raw = await _compiler._llm_call_page_async(
         model,
         [system_msg, known_targets_msg, {"role": "user", "content": user_content}],
         f"consolidate: {page_dir}/{slug}",
         response_format=_compiler._JSON_RESPONSE_FORMAT,
     )
     description, content, _obj = _compiler._page_fields(raw)
-    _compiler._require_nonempty_content(content, slug)
-
-    clean_parts = frontmatter.split(content)
-    clean = clean_parts[1].lstrip("\n") if clean_parts is not None else content
+    clean = frontmatter.strip_model_frontmatter(content)
     cleaned, ghosts = strip_ghost_wikilinks(clean, known_targets)
+    _compiler._require_nonempty_content(cleaned, slug)
     if ghosts:
         logger.info(
             "stripped %d ghost wikilink(s) from consolidated %s/%s: %s",
@@ -214,9 +211,47 @@ async def consolidate_page(
             ghosts[:5],
         )
 
+    sources = fm.get("sources")
+    if isinstance(sources, list):
+        source_targets = [
+            source.removesuffix(".md")
+            for source in sources
+            if isinstance(source, str) and source.startswith("summaries/")
+        ]
+        cleaned = _compiler._with_summary_links(
+            cleaned, [f"[[{target}]]" for target in source_targets if target in known_targets]
+        )
+
     if description:
         fm_block = frontmatter.set_line(fm_block, "description", description)
-    atomic_write_text(path, fm_block + "\n" + cleaned)
+    replacement = fm_block + "\n" + cleaned
+    expected_fm = fm | ({"description": description} if description else {})
+    if frontmatter.parse_required(replacement) != expected_fm:
+        raise ValueError("Consolidation could not preserve the page's frontmatter")
+
+    if not description:
+        atomic_write_text(path, replacement)
+        return True
+
+    # Publish the page and its index row together. This block has no awaits,
+    # so concurrent consolidations each read the latest index before editing it.
+    index_path = wiki_dir / "index.md"
+    index = index_path.read_text(encoding="utf-8") if index_path.exists() else INDEX_SEED
+    lines = index.split("\n")
+    entity_type = (
+        frontmatter.single_line_description(fm.get("type")) if page_dir == "entities" else ""
+    )
+    _compiler._upsert_topic_index_entry(lines, page_dir, slug, description, entity_type.lower())
+    snapshot = snapshot_paths(wiki_dir.parent, [path, index_path], operation="consolidate")
+    try:
+        atomic_write_text(path, replacement)
+        atomic_write_text(index_path, "\n".join(lines))
+        snapshot.mark_committed()
+    except BaseException:
+        if snapshot.rollback_best_effort() is None:
+            snapshot.discard_best_effort()
+        raise
+    snapshot.discard_best_effort()
     return True
 
 
@@ -247,4 +282,9 @@ async def consolidate_pages(
                 return None, exc, time.time() - start
         return ok, None, time.time() - start
 
-    return await asyncio.gather(*(_run_one(page_dir, slug) for page_dir, slug, _ in targets))
+    from openkb.agent.compiler import _close_async_llm_clients
+
+    try:
+        return await asyncio.gather(*(_run_one(page_dir, slug) for page_dir, slug, _ in targets))
+    finally:
+        await _close_async_llm_clients()

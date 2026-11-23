@@ -27,6 +27,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import litellm
@@ -577,17 +578,21 @@ def _warn_if_truncated(response, step_name: str, max_tokens: int | None) -> bool
     return True
 
 
-def _parse_json(text: str) -> list | dict:
-    """Parse JSON from LLM response, handling fences, prose, and malformed JSON."""
-    from json_repair import repair_json
-
+def _unfence_json(text: str) -> str:
     cleaned = text.strip()
     if cleaned.startswith("```"):
         first_nl = cleaned.find("\n")
         cleaned = cleaned[first_nl + 1 :] if first_nl != -1 else cleaned[3:]
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3]
-    result = json.loads(repair_json(cleaned.strip()))
+    return cleaned.strip()
+
+
+def _parse_json(text: str) -> list | dict:
+    """Parse JSON from LLM response, handling fences, prose, and malformed JSON."""
+    from json_repair import repair_json
+
+    result = json.loads(repair_json(_unfence_json(text)))
     if not isinstance(result, (dict, list)):
         raise ValueError(f"Expected JSON object or array, got {type(result).__name__}")
     return result
@@ -603,7 +608,10 @@ def _parse_page_json(text: str) -> dict | None:
     json/ValueError from ``_parse_json`` when the text isn't JSON at all, which
     callers catch to fall back to treating ``raw`` as a prose-markdown body.
     """
-    parsed = _parse_json(text)
+    try:
+        parsed = json.loads(_unfence_json(text))
+    except ValueError:
+        parsed = _parse_json(text)
     if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
         parsed = parsed[0]
     return parsed if isinstance(parsed, dict) else None
@@ -630,7 +638,9 @@ def _page_fields(raw: str) -> tuple[str, str, dict | None]:
         return "", raw, None
     if obj is None:
         return "", "", None
-    return obj.get("description", ""), (obj.get("content") or ""), obj
+    brief = frontmatter.single_line_description(obj.get("description"))
+    content = obj.get("content")
+    return brief, content if isinstance(content, str) else "", obj
 
 
 _WORD_SPLIT_RE = re.compile(r"[-_\s]+")
@@ -1397,14 +1407,10 @@ def _prepend_source_to_frontmatter(text: str, source_file: str) -> str:
         return text
 
     fm_block, body = parts
-    # Strip the trailing closing delimiter to get the prefix lines (opening
-    # "---" + content lines), then re-append it. `frontmatter.split` leaves the
-    # closing at the end of fm_block as either "\n---\n" or a bare "\n---" (when
-    # the page ends at the delimiter with no trailing newline). Assuming only
-    # "\n---\n" would, for the bare form, make the strip below collapse the
-    # whole block and drop every existing frontmatter key.
-    closing = "\n---\n" if fm_block.endswith("\n---\n") else "\n---"
-    fm_prefix = fm_block[: -len(closing)]
+    # Split the closing fence off without assuming an exact spelling or
+    # newline suffix. Keep it verbatim when rebuilding the block.
+    fm_prefix, newline, fence = fm_block.rstrip("\n").rpartition("\n")
+    closing = newline + fence + ("\n" if fm_block.endswith("\n") else "")
     fm_lines = fm_prefix.split("\n")
 
     for i, line in enumerate(fm_lines):
@@ -1441,11 +1447,8 @@ def _remove_source_from_frontmatter(text: str, source_file: str) -> tuple[str, b
         return text, False
 
     fm_block, body = parts
-    # See _prepend_source_to_frontmatter: the closing delimiter may be "\n---\n"
-    # or a bare "\n---" (no trailing newline); strip whichever is present so the
-    # existing frontmatter lines (and the sources: line we need) are preserved.
-    closing = "\n---\n" if fm_block.endswith("\n---\n") else "\n---"
-    fm_prefix = fm_block[: -len(closing)]
+    fm_prefix, newline, fence = fm_block.rstrip("\n").rpartition("\n")
+    closing = newline + fence + ("\n" if fm_block.endswith("\n") else "")
     fm_lines = fm_prefix.split("\n")
 
     for i, line in enumerate(fm_lines):
@@ -1524,6 +1527,19 @@ def _backlink_summary_pages(
     atomic_write_text(summary_path, "\n".join(lines))
 
 
+def _with_summary_links(body: str, links: Sequence[str]) -> str:
+    """Keep source provenance in a rewritten body independently of the model."""
+    missing = [link for link in dict.fromkeys(links) if link not in body]
+    if not missing:
+        return body
+    lines = body.split("\n")
+    heading = "## Related Documents"
+    _ensure_h2_section(lines, heading, quiet=True)
+    for link in reversed(missing):
+        _insert_section_entry(lines, heading, f"- {link}")
+    return "\n".join(lines)
+
+
 def _backlink_pages(
     wiki_dir: Path,
     doc_name: str,
@@ -1541,12 +1557,9 @@ def _backlink_pages(
         if not path.exists():
             continue
         text = path.read_text(encoding="utf-8")
-        if link in text:
-            continue
-        lines = text.split("\n")
-        _ensure_h2_section(lines, "## Related Documents", quiet=True)
-        _insert_section_entry(lines, "## Related Documents", f"- {link}")
-        atomic_write_text(path, "\n".join(lines))
+        updated = _with_summary_links(text, [link])
+        if updated != text:
+            atomic_write_text(path, updated)
 
 
 def _backlink_summary(wiki_dir: Path, doc_name: str, concept_slugs: list[str]) -> None:
@@ -1780,6 +1793,24 @@ def remove_doc_from_index(
     atomic_write_text(index_path, "\n".join(lines))
 
 
+def _upsert_topic_index_entry(
+    lines: list[str], page_dir: str, slug: str, description: str, entity_type: str = ""
+) -> None:
+    section = "## Concepts" if page_dir == "concepts" else "## Entities"
+    if page_dir == "entities":
+        _ensure_h2_section_before(lines, section, "## Explorations")
+    else:
+        _ensure_h2_section(lines, section)
+    link = f"[[{page_dir}/{slug}]]"
+    entry = f"- {link}"
+    if entity_type:
+        entry += f" ({entity_type})"
+    if description:
+        entry += f" — {description}"
+    if not _replace_section_entry(lines, section, link, entry):
+        _insert_section_entry(lines, section, entry)
+
+
 def _update_index(
     wiki_dir: Path,
     doc_name: str,
@@ -1821,34 +1852,13 @@ def _update_index(
 
     for name in concept_names:
         concept_link = f"[[concepts/{name}]]"
-        concept_entry = f"- {concept_link}"
-        if name in concept_briefs:
-            concept_entry += f" — {concept_briefs[name]}"
-        if _section_contains_link(lines, "## Concepts", concept_link):
-            if name in concept_briefs:
-                _replace_section_entry(lines, "## Concepts", concept_link, concept_entry)
-        else:
-            _insert_section_entry(lines, "## Concepts", concept_entry)
+        if name in concept_briefs or not _section_contains_link(lines, "## Concepts", concept_link):
+            _upsert_topic_index_entry(lines, "concepts", name, concept_briefs.get(name, ""))
 
-    entity_names = entity_names or []
     entity_meta = entity_meta or {}
-    if entity_names:
-        # Keep canonical order: Entities sits before Explorations. On an older
-        # index.md that predates the Entities section, plain ``_ensure_h2_section``
-        # would append it after Explorations.
-        _ensure_h2_section_before(lines, "## Entities", "## Explorations")
-    for name in entity_names:
-        link = f"[[entities/{name}]]"
-        # Callers always populate entity_meta alongside entity_names; the
-        # default is a defensive fallback, never hit in practice.
+    for name in entity_names or []:
         etype, brief = entity_meta.get(name, ("other", ""))
-        entry = f"- {link} ({etype})"
-        if brief:
-            entry += f" — {brief}"
-        if _section_contains_link(lines, "## Entities", link):
-            _replace_section_entry(lines, "## Entities", link, entry)
-        else:
-            _insert_section_entry(lines, "## Entities", entry)
+        _upsert_topic_index_entry(lines, "entities", name, brief, etype)
 
     atomic_write_text(index_path, "\n".join(lines))
 
@@ -1865,6 +1875,46 @@ def _format_known_targets(targets: set[str]) -> str:
     if not targets:
         return "(none yet — do not use any [[wikilinks]] in your output)"
     return "\n".join(f"- {t}" for t in sorted(targets))
+
+
+@dataclass(frozen=True)
+class _Promotion:
+    page_dir: str
+    slug: str
+    brief: str
+    notes: list[dict]
+    entity_type: str = ""
+    rewritten_body: str | None = None
+
+    @property
+    def target(self) -> str:
+        return f"{self.page_dir}/{self.slug}"
+
+    def render(self, known_targets: set[str]) -> str:
+        sources = [note["source_file"] for note in reversed(self.notes)]
+        doc_names = [note["doc_name"] for note in self.notes]
+        if self.rewritten_body is None:
+            body = ""
+            for note in self.notes:
+                cleaned, _ = strip_ghost_wikilinks(note["note"], known_targets)
+                _require_nonempty_content(cleaned, self.target)
+                body = compiler_notes._upsert_note_line(
+                    body, note["doc_name"], cleaned, date=note.get("date")
+                )
+        else:
+            body, _ = strip_ghost_wikilinks(self.rewritten_body, known_targets)
+            _require_nonempty_content(body, self.target)
+            body = _with_summary_links(body, [f"[[summaries/{doc}]]" for doc in doc_names])
+
+        fm_lines = [
+            frontmatter.kv_line("type", self.entity_type.title() or "Concept"),
+            frontmatter.list_line("sources", sources),
+        ]
+        if self.brief:
+            fm_lines.append(frontmatter.kv_line("description", self.brief))
+        text = frontmatter.block(fm_lines) + body
+        frontmatter.parse_required(text)
+        return text
 
 
 async def _compile_concepts(
@@ -2217,6 +2267,7 @@ async def _compile_concepts(
                 bundle=bundle,
             )
         brief, content, _ = _page_fields(raw)
+        content = frontmatter.strip_model_frontmatter(content)
         _require_nonempty_content(content, name)
         return name, content, False, brief
 
@@ -2252,6 +2303,7 @@ async def _compile_concepts(
                 bundle=bundle,
             )
         brief, content, _ = _page_fields(raw)
+        content = frontmatter.strip_model_frontmatter(content)
         _require_nonempty_content(content, name)
         return name, content, True, brief
 
@@ -2283,6 +2335,7 @@ async def _compile_concepts(
             )
         brief, content, obj = _page_fields(raw)
         etype_out = obj.get("type") if obj and obj.get("type") in valid_types else etype
+        content = frontmatter.strip_model_frontmatter(content)
         _require_nonempty_content(content, name)
         return name, content, brief, etype_out
 
@@ -2321,6 +2374,7 @@ async def _compile_concepts(
             )
         brief, content, obj = _page_fields(raw)
         etype_out = obj.get("type") if obj and obj.get("type") in valid_types else etype
+        content = frontmatter.strip_model_frontmatter(content)
         _require_nonempty_content(content, name)
         return name, content, brief, etype_out
 
@@ -2441,13 +2495,8 @@ async def _compile_concepts(
         _require_nonempty_content(note, name)
         return name, note, "", etype
 
-    async def _gen_pending_concept(concept: dict) -> tuple[str, str] | None:
-        """Buffer a concept note or promote the topic (see ``openkb.pending``).
-
-        Return ``None`` if the topic is still buffered. For a promotion, the
-        page is already written with all buffered sources, so the caller only
-        needs ``(safe_name, brief)`` for backlinks and index updates.
-        """
+    async def _gen_pending_concept(concept: dict) -> _Promotion | None:
+        """Buffer a concept note and prepare a promotion once it reaches threshold."""
         name = concept["name"]
         title = concept.get("title", name)
         slug = _sanitize_concept_name(name)
@@ -2476,38 +2525,17 @@ async def _compile_concepts(
         new_count = pending_store.add_note("concepts", slug, brief, doc_name, source_file, note)
         if new_count <= MAX_NOTES_BEFORE_PROMOTION:
             return  # still buffering — no page yet
+        notes = prior_notes + [
+            n for n in pending_store.notes("concepts", slug) if n["doc_name"] == doc_name
+        ]
         if concept_update_mode == "append":
-            for n in prior_notes:
-                compiler_notes.append_concept_note(
-                    wiki_dir, name, n["note"], n["source_file"], n["doc_name"], description=brief
-                )
-            compiler_notes.append_concept_note(
-                wiki_dir, name, note, source_file, doc_name, description=brief
-            )
-            pending_store.remove("concepts", slug)
-            return slug, brief
-        _, content, _, brief2 = await _gen_create(concept, extra_context=note_extra_context)
-        cleaned, ghosts = strip_ghost_wikilinks(content, known_targets)
-        if ghosts:
-            logger.info(
-                "stripped %d ghost wikilink(s) from promoted concept %s: %s",
-                len(ghosts),
-                name,
-                ghosts[:5],
-            )
-        _write_concept(wiki_dir, name, cleaned, source_file, False, brief=brief2)
-        path = (wiki_dir / "concepts" / f"{slug}.md").resolve()
-        existing = path.read_text(encoding="utf-8")
-        for n in prior_notes:
-            existing = _prepend_source_to_frontmatter(existing, n["source_file"])
-        atomic_write_text(path, existing)
-        pending_store.remove("concepts", slug)
-        return slug, brief2
+            return _Promotion("concepts", slug, brief, notes)
+        promotion_context = f"{note_extra_context}\nCurrent note ({doc_name}): {note}"
+        _, content, _, brief2 = await _gen_create(concept, extra_context=promotion_context)
+        return _Promotion("concepts", slug, brief2 or brief, notes, rewritten_body=content)
 
-    async def _gen_pending_entity(ent: dict) -> tuple[str, str, str] | None:
-        """Entity counterpart of :func:`_gen_pending_concept` — see there.
-        Returns ``(safe_name, brief, type)`` on promotion, else ``None``.
-        """
+    async def _gen_pending_entity(ent: dict) -> _Promotion | None:
+        """Buffer an entity note and prepare the complete page on promotion."""
         name = ent["name"]
         title = ent.get("title", name)
         etype = ent.get("type", "other")
@@ -2542,41 +2570,16 @@ async def _compile_concepts(
         )
         if new_count <= MAX_NOTES_BEFORE_PROMOTION:
             return  # still buffering — no page yet
+        notes = prior_notes + [
+            n for n in pending_store.notes("entities", slug) if n["doc_name"] == doc_name
+        ]
         if concept_update_mode == "append":
-            for n in prior_notes:
-                compiler_notes.append_entity_note(
-                    wiki_dir,
-                    name,
-                    n["note"],
-                    n["source_file"],
-                    n["doc_name"],
-                    description=brief,
-                    type_=etype,
-                )
-            compiler_notes.append_entity_note(
-                wiki_dir, name, note, source_file, doc_name, description=brief, type_=etype
-            )
-            pending_store.remove("entities", slug)
-            return slug, brief, etype
+            return _Promotion("entities", slug, brief, notes, etype)
+        promotion_context = f"{note_extra_context}\nCurrent note ({doc_name}): {note}"
         _, content, brief2, etype_out = await _gen_entity_create(
-            ent, extra_context=note_extra_context
+            ent, extra_context=promotion_context
         )
-        cleaned, ghosts = strip_ghost_wikilinks(content, known_targets)
-        if ghosts:
-            logger.info(
-                "stripped %d ghost wikilink(s) from promoted entity %s: %s",
-                len(ghosts),
-                name,
-                ghosts[:5],
-            )
-        _write_entity(wiki_dir, name, cleaned, source_file, False, brief=brief2, type_=etype_out)
-        path = (wiki_dir / "entities" / f"{slug}.md").resolve()
-        existing = path.read_text(encoding="utf-8")
-        for n in prior_notes:
-            existing = _prepend_source_to_frontmatter(existing, n["source_file"])
-        atomic_write_text(path, existing)
-        pending_store.remove("entities", slug)
-        return slug, brief2, etype_out
+        return _Promotion("entities", slug, brief2 or brief, notes, etype_out, content)
 
     tasks = []
     # Pending-buffer tasks scheduled first (mirrors the old "create tasks come
@@ -2631,10 +2634,13 @@ async def _compile_concepts(
             asyncio.gather(*entity_tasks, return_exceptions=True),
         )
 
+    promotions: list[_Promotion] = []
     if tasks:
         failure_types: list[str] = []
         self_handled = 0
         for r in results:
+            if isinstance(r, OSError):
+                raise r
             if isinstance(r, Exception):
                 logger.warning("Concept generation failed: %s", r)
                 failure_types.append(type(r).__name__)
@@ -2642,14 +2648,11 @@ async def _compile_concepts(
             if r is None:
                 self_handled += 1
                 continue
-            if len(r) == 2:
-                # Promoted via the pending buffer (openkb.pending): the page
-                # is already written directly — just register it for
-                # backlinking/whitelist/index like a normal create.
-                safe_name, brief = r
-                concept_names.append(safe_name)
-                if brief:
-                    concept_briefs_map[safe_name] = brief
+            if isinstance(r, _Promotion):
+                promotions.append(r)
+                concept_names.append(r.slug)
+                if r.brief:
+                    concept_briefs_map[r.slug] = r.brief
                 self_handled += 1
                 continue
             name, page_content, is_update, brief = r
@@ -2674,6 +2677,8 @@ async def _compile_concepts(
         entity_failure_types: list[str] = []
         entity_self_handled = 0
         for r in entity_results:
+            if isinstance(r, OSError):
+                raise r
             if isinstance(r, Exception):
                 logger.warning("Entity generation failed: %s", r)
                 entity_failure_types.append(type(r).__name__)
@@ -2681,12 +2686,10 @@ async def _compile_concepts(
             if r is None:
                 entity_self_handled += 1
                 continue
-            if len(r) == 3:
-                # Promoted via the pending buffer (openkb.pending) — see the
-                # concept loop above.
-                safe_name, brief, etype = r
-                entity_names.append(safe_name)
-                entity_meta[safe_name] = (etype, brief)
+            if isinstance(r, _Promotion):
+                promotions.append(r)
+                entity_names.append(r.slug)
+                entity_meta[r.slug] = (r.entity_type, r.brief)
                 entity_self_handled += 1
                 continue
             name, page_content, brief, etype = r
@@ -2704,6 +2707,33 @@ async def _compile_concepts(
                 f"for {doc_name} ({reason}).\n"
             )
             sys.stdout.flush()
+
+    # Generation used a provisional whitelist. Only existing pages and
+    # successfully generated promotions may receive links in persisted text.
+    known_targets = (
+        list_existing_wiki_targets(wiki_dir)
+        | {promotion.target for promotion in promotions}
+        | {f"summaries/{doc_name}"}
+    )
+    rendered_promotions = [(p, p.render(known_targets)) for p in promotions]
+    for promotion, text in rendered_promotions:
+        path = wiki_dir / f"{promotion.target}.md"
+        atomic_write_text(path, text)
+        pending_store.remove(promotion.page_dir, promotion.slug)
+        backlink = (
+            _backlink_summary if promotion.page_dir == "concepts" else _backlink_summary_entities
+        )
+        for note in promotion.notes[:-1]:
+            backlink(wiki_dir, note["doc_name"], [promotion.slug])
+
+    # Use the reconciled whitelist for the final summary request as well.
+    if rewrite_summary:
+        known_targets_msg = {
+            "role": "user",
+            "content": _cached_text(
+                _KNOWN_TARGETS_USER.format(known_targets=_format_known_targets(known_targets))
+            ),
+        }
 
     # Strip ghost wikilinks from entity bodies and write each page.
     for name, page_content, brief, etype in entity_pending:
@@ -2762,13 +2792,10 @@ async def _compile_concepts(
                     {"role": "user", "content": _SUMMARY_REWRITE_USER},
                 ],
                 "summary-rewrite",
+                raise_on_truncation=True,
                 bundle=bundle,
             )
-            candidate = rewrite_raw.strip()
-            # Strip frontmatter if the model added one anyway.
-            cand_parts = frontmatter.split(candidate)
-            if cand_parts is not None:
-                candidate = cand_parts[1].lstrip("\n")
+            candidate = frontmatter.strip_model_frontmatter(rewrite_raw.strip())
             # Safety net: strip any wikilink the rewrite emitted that is
             # not in the whitelist.
             candidate, summary_ghosts = strip_ghost_wikilinks(candidate, known_targets)

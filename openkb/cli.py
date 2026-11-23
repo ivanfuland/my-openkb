@@ -76,9 +76,16 @@ from openkb.indexer import (
     _write_long_doc_artifacts,
     prepare_cloud_import,
 )
-from openkb.locks import atomic_write_json, atomic_write_text, kb_ingest_lock, kb_read_lock
+from openkb.locks import (
+    atomic_write_bytes,
+    atomic_write_json,
+    atomic_write_text,
+    kb_ingest_lock,
+    kb_read_lock,
+)
+from openkb.mutation import MutationSnapshot, publish_staged_tree, snapshot_paths
+from openkb.pending import PendingTopicsStore, pending_topics_path
 from openkb.log import append_log
-from openkb.mutation import publish_staged_tree
 from openkb.schema import AGENTS_MD, INDEX_SEED, PAGE_CONTENT_DIRS
 
 # Suppress warnings after all imports — markitdown overrides filters at import time
@@ -433,14 +440,34 @@ def _snapshot_add_paths(
     return paths
 
 
-def _run_compile_with_retry(coro_factory, label: str) -> None:
+def _run_compile_with_retry(
+    coro_factory, label: str, snapshot: MutationSnapshot, *, indexed_summary: Path | None = None
+) -> None:
     click.echo(f"  {label}...")
+    initial_summary = (
+        indexed_summary.read_bytes()
+        if indexed_summary is not None and indexed_summary.exists()
+        else None
+    )
+    wiki = snapshot.kb_dir / "wiki"
+    compile_paths = [
+        path
+        for path in snapshot.entries
+        if path == pending_topics_path(snapshot.kb_dir)
+        or path in {wiki / "concepts", wiki / "entities", wiki / "index.md"}
+        or path.parent == wiki / "summaries"
+    ]
     for attempt in range(2):
         try:
             asyncio.run(coro_factory())
             return
         except Exception as exc:
             if attempt == 0:
+                # Keep staged conversion/indexer inputs in place, but undo
+                # any partial compilation before asking the model again.
+                snapshot.restore(compile_paths)
+                if indexed_summary is not None and initial_summary is not None:
+                    atomic_write_bytes(indexed_summary, initial_summary)
                 click.echo("  Retrying compilation in 2s...")
                 time.sleep(2)
             else:
@@ -567,6 +594,8 @@ def _add_single_file_locked(
                     bundle=bundle,
                 ),
                 label=f"Compiling long doc (doc_id={index_result.doc_id})",
+                snapshot=snapshot,
+                indexed_summary=summary_path,
             )
         else:
             if result.source_path is None:
@@ -582,6 +611,7 @@ def _add_single_file_locked(
                     bundle=bundle,
                 ),
                 label="Compiling short doc",
+                snapshot=snapshot,
             )
 
         # Register hash only after successful compilation.
@@ -755,7 +785,7 @@ def import_from_pageindex_cloud(doc_id: str, kb_dir: Path) -> Literal["added", "
             stem = _cloud_display_stem(cloud.cloud_name, doc_id)
             doc_name = resolve_doc_name_from_key(stem, path_key, registry)
 
-            def commit_body(_snapshot) -> None:
+            def commit_body(snapshot: MutationSnapshot) -> None:
                 summary_path = _write_long_doc_artifacts(
                     cloud.tree,
                     cloud.all_pages,
@@ -775,6 +805,8 @@ def import_from_pageindex_cloud(doc_id: str, kb_dir: Path) -> Literal["added", "
                         max_concurrency=resolve_concurrency(config) or DEFAULT_COMPILE_CONCURRENCY,
                     ),
                     label=f"Compiling imported doc (doc_id={doc_id})",
+                    snapshot=snapshot,
+                    indexed_summary=summary_path,
                 )
 
                 # Register the raw-less cloud entry only after successful compilation.
@@ -1372,6 +1404,8 @@ class RemovePlan:
     actions: list[RemoveAction]
     concept_deletes: list[str]
     entity_deletes: list[str]
+    touched_topics: list[Path]
+    pending_note_count: int
     raw_path: Path | None
     cleanup_pageindex: bool
     pageindex_doc_id: str | None
@@ -1466,6 +1500,16 @@ def _build_remove_plan(
             RemoveAction("MODIFY", f"wiki/entities/{slug}.md  (drop this doc from sources)")
         )
 
+    pending_path = pending_topics_path(kb_dir)
+    pending_note_count = PendingTopicsStore(pending_path).count_document_notes(doc_name)
+    if pending_note_count:
+        actions.append(
+            RemoveAction(
+                "MODIFY",
+                f"{pending_path.relative_to(kb_dir)}  (purge {pending_note_count} note(s))",
+            )
+        )
+
     if (wiki_dir / "index.md").exists():
         actions.append(RemoveAction("MODIFY", "wiki/index.md  (remove Documents entry)"))
 
@@ -1509,6 +1553,11 @@ def _build_remove_plan(
         actions=actions,
         concept_deletes=concept_deletes,
         entity_deletes=entity_deletes,
+        touched_topics=[
+            *(wiki_dir / "concepts" / f"{slug}.md" for slug, _ in affected_concepts),
+            *(wiki_dir / "entities" / f"{slug}.md" for slug, _ in affected_entities),
+        ],
+        pending_note_count=pending_note_count,
         raw_path=raw_path,
         cleanup_pageindex=cleanup_pageindex,
         pageindex_doc_id=pageindex_doc_id,
@@ -1520,6 +1569,41 @@ def _build_remove_plan(
 
 
 def _execute_remove_plan(
+    kb_dir: Path, plan: RemovePlan, registry, *, keep_empty: bool
+) -> RemoveResult:
+    """Journal local wiki and registry changes, including pending notes."""
+    wiki = kb_dir / "wiki"
+    paths = [
+        plan.summary_path,
+        plan.source_md,
+        plan.source_json,
+        plan.images_dir,
+        *plan.touched_topics,
+        wiki / "index.md",
+        wiki / "log.md",
+        kb_dir / ".openkb" / "hashes.json",
+    ]
+    if plan.raw_path is not None:
+        paths.append(plan.raw_path)
+    if plan.pending_note_count:
+        paths.append(pending_topics_path(kb_dir))
+    snapshot = snapshot_paths(
+        kb_dir, paths, operation="remove", details={"doc_name": plan.doc_name}
+    )
+    try:
+        result = _apply_remove_plan(kb_dir, plan, registry, keep_empty=keep_empty)
+        # A PageIndex cleanup error is a supported partial result. The
+        # registry entry remains for retry, and completed wiki edits stick.
+        snapshot.mark_committed()
+    except BaseException:
+        if snapshot.rollback_best_effort() is None:
+            snapshot.discard_best_effort()
+        raise
+    snapshot.discard_best_effort()
+    return result
+
+
+def _apply_remove_plan(
     kb_dir: Path,
     plan: RemovePlan,
     registry,
@@ -1546,6 +1630,9 @@ def _execute_remove_plan(
     openkb_dir = kb_dir / ".openkb"
     doc_name = plan.doc_name
     name = plan.name
+
+    if plan.pending_note_count:
+        PendingTopicsStore(pending_topics_path(kb_dir)).remove_document(doc_name)
 
     plan.summary_path.unlink(missing_ok=True)
     plan.source_md.unlink(missing_ok=True)
@@ -1636,8 +1723,8 @@ def run_remove_for_api(
     from openkb.state import HashRegistry
 
     openkb_dir = kb_dir / ".openkb"
-    registry = HashRegistry(openkb_dir / "hashes.json")
     with kb_ingest_lock(openkb_dir):
+        registry = HashRegistry(openkb_dir / "hashes.json")
         matches = _resolve_doc_identifier(registry, identifier)
         if not matches:
             return {"status": "not_found", "identifier": identifier}
@@ -2171,13 +2258,15 @@ def consolidate(ctx, page_name, all_pages, min_notes, dry_run, yes):
 
     consolidated = 0
     skipped = 0
+    failed = 0
     for (page_dir, slug, _count), (ok, exc, elapsed) in zip(targets, results):
         if exc is not None:
-            click.echo(f"  [ERROR] Consolidation failed: {exc}")
+            detail = " ".join(str(exc).splitlines())
+            click.echo(f"  [ERROR] Consolidation failed: {detail} ({page_dir}/{slug})")
             logging.getLogger(__name__).debug(
                 "Consolidate traceback for %s/%s:", page_dir, slug, exc_info=exc
             )
-            skipped += 1
+            failed += 1
         elif ok:
             click.echo(f"  [OK] {page_dir}/{slug} ({elapsed:.1f}s)")
             consolidated += 1
@@ -2185,8 +2274,11 @@ def consolidate(ctx, page_name, all_pages, min_notes, dry_run, yes):
             click.echo(f"  [SKIP] {page_dir}/{slug} (no pending notes).")
             skipped += 1
 
-    click.echo(f"\nDone: consolidated {consolidated}, skipped {skipped}.")
-    append_log(wiki_dir, "consolidate", f"consolidated {consolidated}, skipped {skipped}")
+    counts = f"consolidated {consolidated}, skipped {skipped}, failed {failed}"
+    click.echo(f"\nDone: {counts}.")
+    append_log(wiki_dir, "consolidate", counts)
+    if failed:
+        ctx.exit(1)
 
 
 async def iter_recompile(

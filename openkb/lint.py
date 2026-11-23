@@ -105,6 +105,7 @@ def strip_ghost_wikilinks(
             target = raw.strip()
             alias = None
 
+        target = target.strip("/")
         # Direct hit
         if target in known_targets:
             return m.group(0)
@@ -213,12 +214,7 @@ def fix_broken_links(
     Returns:
         Tuple of ``(files_changed, ghosts_stripped)``.
     """
-    pages = _all_wiki_pages(wiki)
-    # The same fuzzy normalization _all_wiki_pages stores both the full
-    # relative path (e.g. ``concepts/attention``) and the bare stem
-    # (``attention``). Use the full-path keys so that links like
-    # ``[[concepts/foo]]`` resolve against ``concepts/`` files only.
-    known_targets: set[str] = {key for key in pages if "/" in key or key == "index"}
+    known_targets = set(_all_wiki_pages(wiki))
     # Build the normalized index once and reuse across every file —
     # otherwise strip_ghost_wikilinks would rebuild it per file (O(F·M)).
     norm_index = build_norm_index(known_targets)

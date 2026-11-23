@@ -200,11 +200,13 @@ class MutationSnapshot:
         if changed:
             self.write_journal("active")
 
-    def rollback(self) -> None:
+    def restore(self, paths: list[Path] | None = None) -> None:
+        """Restore backed-up paths while keeping the journal active for a retry."""
+        entries = self.entries if paths is None else {path: self.entries[path] for path in paths}
         # Restore children before parents so directory deletes cannot remove
         # paths that still need to be restored from a more specific backup.
         for target, backup in sorted(
-            self.entries.items(),
+            entries.items(),
             key=lambda item: len(item[0].parts),
             reverse=True,
         ):
@@ -229,6 +231,9 @@ class MutationSnapshot:
                 shutil.copytree(backup, target)
             else:
                 _copy_file_atomic(backup, target)
+
+    def rollback(self) -> None:
+        self.restore()
         self.write_journal("rolled_back")
 
     def rollback_best_effort(self) -> Exception | None:
