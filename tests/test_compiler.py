@@ -37,6 +37,7 @@ from openkb.agent.compiler import (
     compile_short_doc,
     remove_doc_from_entity_pages,
 )
+from openkb.agent.consolidator import consolidate_page
 from openkb.config import resolve_entity_types
 from openkb.pending import PendingTopicsStore
 from openkb.schema import AGENTS_MD
@@ -3447,6 +3448,109 @@ class TestBriefsBudget:
 
         assert "not listed" in out
         assert len(out.splitlines()) < 10
+
+    @pytest.mark.parametrize("read_briefs", [_read_concept_briefs, _read_entity_briefs])
+    def test_pending_only_lists_share_budget_and_disclose_omissions(self, tmp_path, read_briefs):
+        first = "- alpha (pending, 1/3 mentions) — Short description"
+        second = "- beta (pending, 1/3 mentions) — Another description"
+        pending = [first, second]
+
+        assert read_briefs(tmp_path, 0, pending_lines=pending) == f"{first}\n{second}"
+        result = read_briefs(tmp_path, len(first) + 1, pending_lines=pending)
+        assert result.splitlines()[0] == first
+        assert second not in result
+        assert "1 more" in result and "not listed" in result
+        assert "list omitted: 2" in read_briefs(tmp_path, 1, pending_lines=pending)
+
+    @pytest.mark.asyncio
+    async def test_budgeted_plan_with_strict_buffer_append_and_consolidate(self, kb_dir):
+        wiki = kb_dir / "wiki"
+        source = wiki / "sources" / "new-doc.md"
+        source.write_text("A new document about changing approval rules.", encoding="utf-8")
+        (kb_dir / ".openkb" / "config.yaml").write_text(
+            "concept_update_mode: append\nstrict_item_mode: true\nbriefs_budget_chars: 140\n",
+            encoding="utf-8",
+        )
+        self._concept(wiki, "aaa-rare", "r" * 140, n_sources=1)
+        self._concept(wiki, "approval", "Approval rules", n_sources=4)
+        (wiki / "entities").mkdir()
+        (wiki / "entities" / "acme.md").write_text(
+            "---\ntype: organization\nsources: [summaries/doc0.md]\n"
+            'description: "Acme"\n---\n\n# Acme\n',
+            encoding="utf-8",
+        )
+        _seed_pending(kb_dir, "concepts", "timeout", "Some approvals time out", n=1)
+        _seed_pending(kb_dir, "entities", "vendor", "A vendor", n=1, type_="organization")
+        _seed_pending(kb_dir, "entities", "large", "d" * 140, n=1, type_="organization")
+
+        plan = json.dumps(
+            {
+                "concepts": {
+                    "create": [{"name": "very-long-concept-name"}],
+                    "update": [{"name": "approval", "title": "Approval"}, {"name": "timeout"}],
+                },
+                "entities": {"create": [{"name": "bad-type", "type": "invalid"}]},
+            }
+        )
+        summary = "# Summary\n\nA document about approvals."
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.completion = MagicMock(
+                side_effect=_mock_completion([summary, plan, summary])
+            )
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=_routed_acompletion(
+                    [
+                        ("Concept page: Approval", json.dumps({"note": "Approvals now escalate."})),
+                        (
+                            "NEW concept page: timeout",
+                            json.dumps(
+                                {"description": "Escalation timeouts", "note": "Another timeout."}
+                            ),
+                        ),
+                        (
+                            "Consolidate the concept page: Approval",
+                            json.dumps({"content": "# Approval\n\nApproval rules now escalate."}),
+                        ),
+                    ]
+                )
+            )
+            await compile_short_doc("new-doc", source, kb_dir, "gpt-4o-mini")
+
+            plan_prompt = mock_litellm.completion.call_args_list[1].kwargs["messages"][-1][
+                "content"
+            ]
+            assert "- approval: Approval rules" in plan_prompt
+            assert "- aaa-rare:" not in plan_prompt
+            assert "- timeout (pending" not in plan_prompt
+            assert "2 more concepts not listed" in plan_prompt
+            assert "truncated to the 1 most-cited" in plan_prompt
+            assert "- acme (organization, 1 sources)" in plan_prompt
+            assert "- vendor (pending, 1/3 mentions) — A vendor" in plan_prompt
+            assert "- large (pending" not in plan_prompt
+            assert "1 more entities not listed" in plan_prompt
+
+            store = PendingTopicsStore(kb_dir / ".openkb" / "pending_topics.json")
+            assert store.note_count("concepts", "timeout") == 2
+            assert store.get("concepts", "timeout")["description"] == "Escalation timeouts"
+            assert not (wiki / "concepts" / "timeout.md").exists()
+            assert store.get("concepts", "very-long-concept-name") is None
+            assert store.get("entities", "bad-type") is None
+            assert mock_litellm.acompletion.await_count == 2
+
+            approval = wiki / "concepts" / "approval.md"
+            original = approval.read_text(encoding="utf-8")
+            assert "# approval" in original
+            assert "## Notes" in original and "Approvals now escalate." in original
+            assert await consolidate_page(wiki, "concepts", "approval", "gpt-4o-mini")
+            consolidate_prompt = _message_text(
+                mock_litellm.acompletion.call_args.kwargs["messages"]
+            )
+            assert "Approvals now escalate." in consolidate_prompt
+
+        consolidated = approval.read_text(encoding="utf-8")
+        assert "## Notes" not in consolidated
+        assert "Approval rules now escalate." in consolidated
+        assert '"summaries/new-doc.md"' in consolidated
 
 
 class TestResolveBriefsBudget:

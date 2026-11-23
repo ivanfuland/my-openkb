@@ -259,6 +259,16 @@ pageindex_threshold: 20          # PDF pages threshold for PageIndex
 
 The full settings reference — `entity_types`, OAuth providers (`chatgpt/*`, `github_copilot/*`), and LiteLLM tuning (timeouts for slow local runtimes like Ollama / LM Studio, `drop_params`, GitHub Copilot headers, install notes) — is in **[`examples/configuration/`](examples/configuration/)**.
 
+### Compilation settings
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| `concept_update_mode` | `rewrite` | `rewrite` sends the full existing page to the LLM to incorporate the new document. `append` generates a short note for the new document and records it under `## Notes`. Run `openkb consolidate <page>` or `openkb consolidate --all` to fold accumulated notes into prose. |
+| `strict_item_mode` | `false` | When enabled, drops proposed new concept or entity names longer than three words. It also drops proposed new entities whose types fall outside `entity_types`. OpenKB logs these drops as warnings. |
+| `briefs_budget_chars` | `120000` | Character budget for brief entries in each planning list (concepts and entities). The list shows existing pages in source-count order, followed by pending topics as space allows. The prompt discloses omissions. Set `0` to disable trimming. |
+
+New concepts and entities collect pending notes until their third mention, when OpenKB promotes them to wiki pages.
+
 ### PageIndex Setup
 
 Long-document retrieval is a [known challenge](https://x.com/karpathy/status/2039823314982744522) for LLMs. [PageIndex](https://github.com/VectifyAI/PageIndex) solves this with vectorless, reasoning-based retrieval, by building a hierarchical tree index that lets LLMs reason over the index for context-aware retrieval.
