@@ -151,7 +151,7 @@ def test_default_config_values():
 
 
 def test_concept_update_mode_default_in_config():
-    assert DEFAULT_CONFIG["concept_update_mode"] == "rewrite"
+    assert DEFAULT_CONFIG["concept_update_mode"] == "append"
 
 
 def test_concept_update_mode_not_in_global_scalar_keys():
@@ -161,7 +161,7 @@ def test_concept_update_mode_not_in_global_scalar_keys():
 
 
 def test_resolve_concept_update_mode_absent_is_default():
-    assert resolve_concept_update_mode({}) == "rewrite"
+    assert resolve_concept_update_mode({}) == "append"
 
 
 def test_resolve_concept_update_mode_valid_values():
@@ -172,8 +172,9 @@ def test_resolve_concept_update_mode_valid_values():
 def test_resolve_concept_update_mode_rejects_invalid(caplog):
     with caplog.at_level(logging.WARNING, logger="openkb.config"):
         result = resolve_concept_update_mode({"concept_update_mode": "bogus"})
-    assert result == "rewrite"
-    assert "concept_update_mode" in caplog.text
+    assert result == "append"
+    assert "'concept_update_mode' must be one of" in caplog.text
+    assert "using 'append'." in caplog.text
 
 
 def test_concurrency_not_in_default_config():
@@ -188,7 +189,7 @@ def test_concurrency_not_in_default_config():
 
 
 def test_strict_item_mode_default_in_config():
-    assert DEFAULT_CONFIG["strict_item_mode"] is False
+    assert DEFAULT_CONFIG["strict_item_mode"] is True
 
 
 def test_strict_item_mode_not_in_global_scalar_keys():
@@ -198,7 +199,7 @@ def test_strict_item_mode_not_in_global_scalar_keys():
 
 
 def test_resolve_strict_item_mode_absent_is_default():
-    assert resolve_strict_item_mode({}) is False
+    assert resolve_strict_item_mode({}) is True
 
 
 def test_resolve_strict_item_mode_valid_values():
@@ -209,8 +210,9 @@ def test_resolve_strict_item_mode_valid_values():
 def test_resolve_strict_item_mode_rejects_non_bool(caplog):
     with caplog.at_level(logging.WARNING, logger="openkb.config"):
         result = resolve_strict_item_mode({"strict_item_mode": "yes"})
-    assert result is False
-    assert "strict_item_mode" in caplog.text
+    assert result is True
+    assert "'strict_item_mode' must be a bool" in caplog.text
+    assert "using True." in caplog.text
 
 
 def test_load_concurrency_override(tmp_path):

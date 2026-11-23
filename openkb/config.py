@@ -11,6 +11,7 @@ from typing import Any, Iterator
 
 import yaml
 
+from openkb.compiler_config import DEFAULT_CONCEPT_UPDATE_MODE, DEFAULT_STRICT_ITEM_MODE
 from openkb.compiler_config import VALID_CONCEPT_UPDATE_MODES as VALID_CONCEPT_UPDATE_MODES
 from openkb.compiler_config import resolve_concept_update_mode as resolve_concept_update_mode
 from openkb.compiler_config import resolve_strict_item_mode as resolve_strict_item_mode
@@ -42,11 +43,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # How concept/entity pages absorb new documents on `openkb add` — see
     # resolve_concept_update_mode(). KB config.yaml only (like `debug`), not
     # in GLOBAL_SCALAR_KEYS.
-    "concept_update_mode": "rewrite",
-    # Opt-in strict mode for brand-new concept/entity `create` items — see
+    "concept_update_mode": DEFAULT_CONCEPT_UPDATE_MODE,
+    # Strict validation of brand-new concept/entity `create` items — see
     # resolve_strict_item_mode(). KB config.yaml only, not in
     # GLOBAL_SCALAR_KEYS (same treatment as concept_update_mode above).
-    "strict_item_mode": False,
+    "strict_item_mode": DEFAULT_STRICT_ITEM_MODE,
     # Per-list character cap for the concept/entity briefs in the compile plan
     # prompt. Those lists are O(KB) and are rebuilt for every compiled document,
     # so without a ceiling a large KB eventually exceeds the model's context
