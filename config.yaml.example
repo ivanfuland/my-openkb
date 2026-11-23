@@ -6,6 +6,7 @@ pageindex_threshold: 20          # PDF pages threshold for PageIndex
 # README.md#compilation-settings for behavior and trade-offs.
 # concept_update_mode: append  # opt out with rewrite
 # strict_item_mode: true       # opt out with false
+# consolidate_model: gpt-5.4   # model for `openkb consolidate` (defaults to `model`)
 
 # Optional: cap concurrent LLM calls during ingest (PageIndex indexing and
 # concept/entity compilation — they never overlap, so one setting covers

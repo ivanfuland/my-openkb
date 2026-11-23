@@ -268,8 +268,9 @@ Set these options in the knowledge base's `.openkb/config.yaml`.
 | `concept_update_mode` | `append` | Adds or replaces the document’s dated, source-linked entry under `## Notes` on concept and entity pages, preserving existing prose. The LLM generates the note from document context independently of the existing page body. New pages start with their buffered notes. Set `rewrite` to send the existing page to the LLM for a full rewrite that can overwrite manual edits. See `openkb consolidate --help` to fold notes into prose. |
 | `strict_item_mode` | `true` | Rejects `create` proposals for concepts and entities with names longer than three words, counting hyphens and underscores as separators. It also rejects entity `create` proposals with a type outside `entity_types`. OpenKB logs these drops as warnings. Set `false` to allow longer names and coerce unknown entity types to `other`. |
 | `briefs_budget_chars` | `120000` | Caps brief entries separately for concepts and entities in the planning prompt. Each list starts with the most-cited existing pages, then includes pending topics as space allows. The prompt discloses omissions. Set `0` to disable trimming. |
+| `consolidate_model` | `model` | Model used by `openkb consolidate`. Omit it (or set it to `null`) to use `model`. A blank or non-string value logs a warning and falls back to `model`. |
 
-For `concept_update_mode` and `strict_item_mode`, OpenKB logs a warning and uses the default if the configured value is invalid.
+For `concept_update_mode` and `strict_item_mode`, OpenKB logs a warning and uses the default if the configured value is invalid. `consolidate_model` likewise falls back to `model` with a warning.
 
 In both update modes, a new topic stays in the pending buffer until the compiler
 has collected notes about it from three distinct documents. Recompiling the
