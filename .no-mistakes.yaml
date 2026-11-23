@@ -1,0 +1,6 @@
+# Canonical project checks for my-openkb (aligned with .github/workflows/ci.yml).
+commands:
+  prepare: "uv sync --locked --extra dev --extra api --python 3.12"
+  lint: "uv run --locked --extra dev --extra api --python 3.12 ruff check . && uv run --locked --extra dev --extra api --python 3.12 ruff format --check . && uv run --locked --extra dev --extra api --python 3.12 mypy openkb"
+  format: "uv run --locked --extra dev --extra api --python 3.12 ruff format ."
+  test: "uv run --locked --extra dev --extra api --python 3.12 pytest"
