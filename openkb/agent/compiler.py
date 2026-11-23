@@ -2080,24 +2080,27 @@ async def _compile_concepts(
     # candidate that already has a real page keeps today's exact behavior
     # (normal update path); "create" itself never writes a page directly
     # anymore — it always goes through the buffer first.
-    def _has_real_page(dirpath: Path, name: str) -> bool:
-        return (dirpath / f"{_sanitize_concept_name(name)}.md").exists()
+    def _partition_candidates(
+        dirpath: Path, candidates: list[dict]
+    ) -> tuple[list[dict], list[dict]]:
+        updates: list[dict] = []
+        pending: dict[str, dict] = {}
+        for item in candidates:
+            slug = _sanitize_concept_name(item["name"])
+            if (dirpath / f"{slug}.md").exists():
+                updates.append(item)
+            else:
+                pending.setdefault(slug, item)
+        return updates, list(pending.values())
 
-    concepts_dir = wiki_dir / "concepts"
-    entities_dir = wiki_dir / "entities"
-
-    concept_candidates = create_items + update_items
-    update_items = [c for c in concept_candidates if _has_real_page(concepts_dir, c["name"])]
-    pending_concept_candidates = [
-        c for c in concept_candidates if not _has_real_page(concepts_dir, c["name"])
-    ]
+    update_items, pending_concept_candidates = _partition_candidates(
+        wiki_dir / "concepts", create_items + update_items
+    )
     create_items = []
 
-    entity_candidates = entity_create + entity_update
-    entity_update = [e for e in entity_candidates if _has_real_page(entities_dir, e["name"])]
-    pending_entity_candidates = [
-        e for e in entity_candidates if not _has_real_page(entities_dir, e["name"])
-    ]
+    entity_update, pending_entity_candidates = _partition_candidates(
+        wiki_dir / "entities", entity_create + entity_update
+    )
     entity_create = []
 
     # Only candidates whose buffer ALREADY holds MAX_NOTES_BEFORE_PROMOTION
@@ -2105,18 +2108,15 @@ async def _compile_concepts(
     # is their 3rd) — those need to be in the wikilink whitelist below; a
     # still-buffering candidate (1st/2nd mention) must NOT be, since no page
     # will exist for it yet.
+    def _will_promote(kind: str, item: dict) -> bool:
+        slug = _sanitize_concept_name(item["name"])
+        count = pending_store.note_count(kind, slug, excluding_doc=doc_name)
+        return count >= MAX_NOTES_BEFORE_PROMOTION
+
     pending_concept_promote = [
-        c
-        for c in pending_concept_candidates
-        if pending_store.note_count("concepts", _sanitize_concept_name(c["name"]))
-        >= MAX_NOTES_BEFORE_PROMOTION
+        c for c in pending_concept_candidates if _will_promote("concepts", c)
     ]
-    pending_entity_promote = [
-        e
-        for e in pending_entity_candidates
-        if pending_store.note_count("entities", _sanitize_concept_name(e["name"]))
-        >= MAX_NOTES_BEFORE_PROMOTION
-    ]
+    pending_entity_promote = [e for e in pending_entity_candidates if _will_promote("entities", e)]
 
     # Distinguish "filters dropped everything" from "LLM emitted an empty plan".
     # Count entity items too, so a plan that emitted only entities — all of
@@ -2463,8 +2463,8 @@ async def _compile_concepts(
         name = concept["name"]
         title = concept.get("title", name)
         slug = _sanitize_concept_name(name)
-        prior_entry = pending_store.get("concepts", slug)
-        note_extra_context = _prior_notes_context(prior_entry["notes"] if prior_entry else [])
+        prior_notes = pending_store.notes("concepts", slug, excluding_doc=doc_name)
+        note_extra_context = _prior_notes_context(prior_notes)
         async with semaphore:
             raw = await _llm_call_page_async(
                 model,
@@ -2488,8 +2488,6 @@ async def _compile_concepts(
         new_count = pending_store.add_note("concepts", slug, brief, doc_name, source_file, note)
         if new_count <= MAX_NOTES_BEFORE_PROMOTION:
             return  # still buffering — no page yet
-        entry = pending_store.get("concepts", slug)
-        prior_notes = entry["notes"][:-1] if entry else []
         pending_store.remove("concepts", slug)
         if concept_update_mode == "append":
             for n in prior_notes:
@@ -2499,9 +2497,8 @@ async def _compile_concepts(
             compiler_notes.append_concept_note(
                 wiki_dir, name, note, source_file, doc_name, description=brief
             )
-            return
-        extra_context = _prior_notes_context(prior_notes)
-        _, content, _, brief2 = await _gen_create(concept, extra_context=extra_context)
+            return slug, brief
+        _, content, _, brief2 = await _gen_create(concept, extra_context=note_extra_context)
         cleaned, ghosts = strip_ghost_wikilinks(content, known_targets)
         if ghosts:
             logger.info(
@@ -2526,8 +2523,8 @@ async def _compile_concepts(
         title = ent.get("title", name)
         etype = ent.get("type", "other")
         slug = _sanitize_concept_name(name)
-        prior_entry = pending_store.get("entities", slug)
-        note_extra_context = _prior_notes_context(prior_entry["notes"] if prior_entry else [])
+        prior_notes = pending_store.notes("entities", slug, excluding_doc=doc_name)
+        note_extra_context = _prior_notes_context(prior_notes)
         async with semaphore:
             raw = await _llm_call_page_async(
                 model,
@@ -2556,8 +2553,6 @@ async def _compile_concepts(
         )
         if new_count <= MAX_NOTES_BEFORE_PROMOTION:
             return  # still buffering — no page yet
-        entry = pending_store.get("entities", slug)
-        prior_notes = entry["notes"][:-1] if entry else []
         pending_store.remove("entities", slug)
         if concept_update_mode == "append":
             for n in prior_notes:
@@ -2573,9 +2568,10 @@ async def _compile_concepts(
             compiler_notes.append_entity_note(
                 wiki_dir, name, note, source_file, doc_name, description=brief, type_=etype
             )
-            return
-        extra_context = _prior_notes_context(prior_notes)
-        _, content, brief2, etype_out = await _gen_entity_create(ent, extra_context=extra_context)
+            return slug, brief, etype
+        _, content, brief2, etype_out = await _gen_entity_create(
+            ent, extra_context=note_extra_context
+        )
         cleaned, ghosts = strip_ghost_wikilinks(content, known_targets)
         if ghosts:
             logger.info(
@@ -2654,10 +2650,6 @@ async def _compile_concepts(
                 failure_types.append(type(r).__name__)
                 continue
             if r is None:
-                # Pending-buffer step (openkb.pending): a still-buffering note
-                # or a promotion that already wrote its own page directly —
-                # neither is a failure, and neither has anything left to do
-                # in pending_writes below.
                 self_handled += 1
                 continue
             if len(r) == 2:
@@ -2697,8 +2689,6 @@ async def _compile_concepts(
                 entity_failure_types.append(type(r).__name__)
                 continue
             if r is None:
-                # Pending-buffer step (openkb.pending) — see the concept loop
-                # above for why this isn't a failure.
                 entity_self_handled += 1
                 continue
             if len(r) == 3:

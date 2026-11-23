@@ -42,17 +42,24 @@ class PendingTopicsStore:
             self._data: dict[str, dict[str, dict]] = data if isinstance(data, dict) else {}
         else:
             self._data = {}
-        self._data.setdefault("concepts", {})
-        self._data.setdefault("entities", {})
+        for kind in ("concepts", "entities"):
+            for entry in self._data.setdefault(kind, {}).values():
+                by_doc = {note["doc_name"]: note for note in entry.get("notes", [])}
+                entry["notes"] = list(by_doc.values())
 
     def get(self, kind: str, slug: str) -> dict | None:
         """Return the pending entry for ``slug`` in ``kind``, or None."""
         return self._data[kind].get(slug)
 
-    def note_count(self, kind: str, slug: str) -> int:
-        """Return how many notes are already buffered for ``slug`` (0 if absent)."""
+    def notes(self, kind: str, slug: str, *, excluding_doc: str | None = None) -> list[dict]:
         entry = self.get(kind, slug)
-        return len(entry["notes"]) if entry else 0
+        if entry is None:
+            return []
+        return [note for note in entry["notes"] if note["doc_name"] != excluding_doc]
+
+    def note_count(self, kind: str, slug: str, *, excluding_doc: str | None = None) -> int:
+        """Return how many notes are already buffered for ``slug`` (0 if absent)."""
+        return len(self.notes(kind, slug, excluding_doc=excluding_doc))
 
     def add_note(
         self,
@@ -64,7 +71,7 @@ class PendingTopicsStore:
         note: str,
         type_: str | None = None,
     ) -> int:
-        """Append a note for ``slug``, creating the entry if it's missing.
+        """Store a note for ``doc_name`` within ``slug``, replacing any prior note.
 
         ``description`` is the LLM-generated one-sentence brief for this note
         (same value a real page's frontmatter ``description`` would get) —
@@ -79,16 +86,21 @@ class PendingTopicsStore:
         entry["description"] = description
         if type_ is not None:
             entry["type"] = type_
-        entry["notes"].append(
-            {
-                "doc_name": doc_name,
-                "source_file": source_file,
-                "note": note,
-                "date": datetime.date.today().isoformat(),
-            }
-        )
+        notes = entry["notes"]
+        new_note = {
+            "doc_name": doc_name,
+            "source_file": source_file,
+            "note": note,
+            "date": datetime.date.today().isoformat(),
+        }
+        for i, buffered in enumerate(notes):
+            if buffered["doc_name"] == doc_name:
+                notes[i] = new_note
+                break
+        else:
+            notes.append(new_note)
         self._persist()
-        return len(entry["notes"])
+        return len(notes)
 
     def remove(self, kind: str, slug: str) -> None:
         """Remove a pending entry (called right after promotion to a real page)."""

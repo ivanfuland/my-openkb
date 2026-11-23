@@ -24,7 +24,6 @@ _GRANDFATHERED = {
     "openkb/cli.py",  # monolithic Click entry point; split into command groups
     "openkb/agent/compiler.py",  # LLM wiki compiler; split into focused units
     "openkb/agent/chat.py",  # chat loop; extract cohesive concerns
-    "openkb/config.py",  # dense config resolvers; consider splitting by concern
 }
 
 

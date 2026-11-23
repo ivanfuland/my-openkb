@@ -2526,17 +2526,23 @@ class TestPendingBufferLifecycle:
         assert '"summaries/doc-3.md"' in text
 
     @pytest.mark.asyncio
-    async def test_three_mentions_promote_in_append_mode(self, tmp_path):
+    @pytest.mark.parametrize("kind", ["concepts", "entities"])
+    async def test_three_mentions_promote_in_append_mode(self, tmp_path, kind):
         wiki = self._setup_wiki(tmp_path)
-        path = wiki / "concepts" / "flaky-timeout.md"
+        path = wiki / kind / "flaky-timeout.md"
+        link = f"[[{kind}/flaky-timeout]]"
+        brief = "A recurring timeout bug"
+        item = {"name": "flaky-timeout", "type": "event"}
 
-        for i in range(1, 4):
-            note_response = json.dumps(
-                {"description": "A recurring timeout bug", "note": f"seen in doc-{i}"}
-            )
+        for i, doc_name in enumerate(("doc-1", "doc-2", "doc-1", "doc-3"), start=1):
+            promotes = doc_name == "doc-3"
+            update = [{**item, "name": "flaky timeout"}] if promotes else []
+            plan_response = json.dumps({kind: {"create": [item], "update": update}})
+            note_response = json.dumps({"description": brief, "note": f"seen at compile {i}"})
+            summary_response = "# Summary" if promotes else f"# Summary\n\nSee {link}."
             with patch("openkb.agent.compiler.litellm") as mock_litellm:
                 mock_litellm.completion = MagicMock(
-                    side_effect=_mock_completion([self._plan_response()])
+                    side_effect=_mock_completion([plan_response, summary_response])
                 )
                 mock_litellm.acompletion = AsyncMock(side_effect=_mock_acompletion([note_response]))
                 await _compile_concepts(
@@ -2546,20 +2552,30 @@ class TestPendingBufferLifecycle:
                     {"role": "system", "content": "s"},
                     {"role": "user", "content": "d"},
                     "summary",
-                    f"doc-{i}",
+                    doc_name,
                     5,
+                    rewrite_summary=True,
                     concept_update_mode="append",
                 )
-            if i < 3:
-                assert not path.exists(), f"should not promote after mention {i}"
-            else:
-                assert path.exists(), "should promote on the 3rd mention"
+                assert mock_litellm.acompletion.await_count == 1
 
+            summary = (wiki / "summaries" / f"{doc_name}.md").read_text(encoding="utf-8")
+            index = (wiki / "index.md").read_text(encoding="utf-8")
+            assert path.exists() == promotes
+            assert (link in summary) == promotes
+            assert (link in index) == promotes
+
+        type_label = " (event)" if kind == "entities" else ""
+        assert f"- {link}{type_label} — {brief}" in index.splitlines()
         text = path.read_text(encoding="utf-8")
-        assert "seen in doc-1" in text
-        assert "seen in doc-2" in text
-        assert "seen in doc-3" in text
-        assert '"summaries/doc-1.md"' in text
+        assert "seen at compile 1" not in text
+        for i in (2, 3, 4):
+            assert f"seen at compile {i}" in text
+        assert "[[summaries/doc-3]]" in text
+        for doc_name in ("doc-1", "doc-2", "doc-3"):
+            assert f'"summaries/{doc_name}.md"' in text
+        store = PendingTopicsStore(tmp_path / ".openkb" / "pending_topics.json")
+        assert store.get(kind, "flaky-timeout") is None
 
 
 class TestBriefIntegration:

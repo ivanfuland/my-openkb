@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from openkb.pending import MAX_NOTES_BEFORE_PROMOTION, PendingTopicsStore
@@ -46,6 +48,40 @@ def test_add_note_accumulates_in_order(tmp_path):
     assert count == 2
     notes = store.get("concepts", "attention")["notes"]
     assert [n["note"] for n in notes] == ["note 1", "note 2"]
+
+
+@pytest.mark.parametrize("kind", ["concepts", "entities"])
+def test_add_note_replaces_existing_document_note(tmp_path, kind):
+    path = tmp_path / "pending_topics.json"
+    store = PendingTopicsStore(path)
+    store.add_note(kind, "topic", "desc 1", "doc-1", "summaries/doc-1.md", "note 1")
+    store.add_note(kind, "topic", "desc 2", "doc-2", "summaries/doc-2.md", "note 2")
+    count = store.add_note(kind, "topic", "updated", "doc-1", "updated-source.md", "updated note")
+
+    assert count == MAX_NOTES_BEFORE_PROMOTION
+    reloaded = PendingTopicsStore(path)
+    assert reloaded.brief_lines(kind) == ["- topic (pending, 2/3 mentions) — updated"]
+    notes = reloaded.get(kind, "topic")["notes"]
+    assert [(n["doc_name"], n["source_file"], n["note"]) for n in notes] == [
+        ("doc-1", "updated-source.md", "updated note"),
+        ("doc-2", "summaries/doc-2.md", "note 2"),
+    ]
+
+
+def test_store_loads_latest_note_per_document(tmp_path):
+    path = tmp_path / "pending_topics.json"
+    entry = {
+        "description": "updated",
+        "notes": [
+            {"doc_name": "doc-1", "source_file": "summaries/doc-1.md", "note": text, "date": date}
+            for text, date in (("old", "2026-01-01"), ("new", "2026-01-02"))
+        ],
+    }
+    path.write_text(json.dumps({"concepts": {"topic": entry}}), encoding="utf-8")
+
+    store = PendingTopicsStore(path)
+    assert store.note_count("concepts", "topic") == 1
+    assert store.get("concepts", "topic")["notes"] == [entry["notes"][-1]]
 
 
 def test_add_note_overwrites_description_not_accumulates(tmp_path):
