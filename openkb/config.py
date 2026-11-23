@@ -14,6 +14,7 @@ import yaml
 from openkb.compiler_config import DEFAULT_CONCEPT_UPDATE_MODE, DEFAULT_STRICT_ITEM_MODE
 from openkb.compiler_config import VALID_CONCEPT_UPDATE_MODES as VALID_CONCEPT_UPDATE_MODES
 from openkb.compiler_config import resolve_concept_update_mode as resolve_concept_update_mode
+from openkb.compiler_config import resolve_consolidate_model as resolve_consolidate_model
 from openkb.compiler_config import resolve_strict_item_mode as resolve_strict_item_mode
 from openkb.locks import atomic_write_text, flock, funlock
 

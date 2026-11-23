@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
+import yaml
 from click.testing import CliRunner
 
 from openkb.cli import cli
@@ -122,3 +124,98 @@ class TestConsolidateExecution:
         assert result.exit_code == 0, result.output
         assert "[ERROR] Consolidation failed: boom" in result.output
         assert "Done: consolidated 1, skipped 1." in result.output
+
+
+def _set_config(kb_dir, config: dict) -> None:
+    (kb_dir / ".openkb" / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+
+class TestConsolidateModel:
+    """`consolidate_model` resolution and its provider-detection effect."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_llm_env(self, tmp_path, monkeypatch):
+        # Don't pick up the developer's real keys or global .env.
+        import openkb.config as config_mod
+        from openkb.cli import _KNOWN_PROVIDER_KEYS
+
+        monkeypatch.setattr(config_mod, "GLOBAL_CONFIG_DIR", tmp_path / "no-global")
+        for key in (
+            "LLM_API_KEY",
+            "GITHUB_COPILOT_API_KEY",
+            "CHATGPT_API_KEY",
+            *_KNOWN_PROVIDER_KEYS,
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+    def _run(self, kb_dir, config: dict):
+        _seed_page_with_notes(kb_dir)
+        _set_config(kb_dir, config)
+        with (
+            patch(
+                "openkb.agent.consolidator.consolidate_page",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_consolidate,
+            patch("openkb.cli._setup_llm_key") as mock_setup,
+        ):
+            result = _invoke(kb_dir, ["consolidate", "approval-workflows"])
+        assert result.exit_code == 0, result.output
+        model = mock_consolidate.call_args.args[3]
+        return result, model, mock_setup
+
+    def test_configured_consolidate_model_wins(self, kb_dir):
+        result, model, mock_setup = self._run(
+            kb_dir,
+            {"model": "openai/gpt-4o", "consolidate_model": "anthropic/claude-sonnet-4-5"},
+        )
+        assert model == "anthropic/claude-sonnet-4-5"
+        # Provider detection must see the consolidate model, not `model`.
+        mock_setup.assert_called_once_with(kb_dir, model_override="anthropic/claude-sonnet-4-5")
+        assert "Done: consolidated 1, skipped 0." in result.output
+
+    def test_falls_back_to_model_when_consolidate_model_absent(self, kb_dir):
+        _, model, mock_setup = self._run(kb_dir, {"model": "openai/gpt-4o"})
+        assert model == "openai/gpt-4o"
+        mock_setup.assert_called_once_with(kb_dir, model_override="openai/gpt-4o")
+
+    def test_falls_back_to_model_when_consolidate_model_null(self, kb_dir):
+        _, model, _ = self._run(kb_dir, {"model": "openai/gpt-4o", "consolidate_model": None})
+        assert model == "openai/gpt-4o"
+
+    def test_setup_llm_key_model_override_skips_oauth_warning(self, kb_dir, capsys):
+        from openkb.cli import _setup_llm_key
+
+        _set_config(kb_dir, {"model": "openai/gpt-4o", "consolidate_model": "chatgpt/gpt-5.4"})
+        # The config's `model` is an API-key provider -> warning.
+        _setup_llm_key(kb_dir)
+        assert "No LLM API key found" in capsys.readouterr().out
+        # The OAuth consolidate model suppresses it.
+        _setup_llm_key(kb_dir, model_override="chatgpt/gpt-5.4")
+        assert "No LLM API key found" not in capsys.readouterr().out
+
+    def test_consolidate_uses_consolidate_model_for_provider_detection(self, kb_dir):
+        # Control: OAuth `model` but API-key `consolidate_model` -> the warning
+        # must appear, proving detection followed the override.
+        _seed_page_with_notes(kb_dir)
+        _set_config(kb_dir, {"model": "chatgpt/gpt-5.4", "consolidate_model": "openai/gpt-4o"})
+        with patch(
+            "openkb.agent.consolidator.consolidate_page",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            result = _invoke(kb_dir, ["consolidate", "approval-workflows"])
+        assert result.exit_code == 0, result.output
+        assert "No LLM API key found" in result.output
+
+    def test_consolidate_oauth_consolidate_model_suppresses_warning(self, kb_dir):
+        _seed_page_with_notes(kb_dir)
+        _set_config(kb_dir, {"model": "openai/gpt-4o", "consolidate_model": "chatgpt/gpt-5.4"})
+        with patch(
+            "openkb.agent.consolidator.consolidate_page",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            result = _invoke(kb_dir, ["consolidate", "approval-workflows"])
+        assert result.exit_code == 0, result.output
+        assert "No LLM API key found" not in result.output
