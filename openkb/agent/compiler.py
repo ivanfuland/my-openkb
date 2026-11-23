@@ -602,11 +602,9 @@ def _parse_page_json(text: str) -> dict | None:
     """Parse an LLM page response into a single JSON object.
 
     Unwraps a single-element ``[{...}]`` array (some models wrap the object in
-    a list). Returns ``None`` when the response is valid JSON of the wrong
-    shape (empty/multi-element array, list of scalars) so callers skip the page
-    rather than persisting the raw JSON text as its body. Propagates the
-    json/ValueError from ``_parse_json`` when the text isn't JSON at all, which
-    callers catch to fall back to treating ``raw`` as a prose-markdown body.
+    a list). Returns ``None`` for other arrays and all JSON scalars. Parse
+    errors from :func:`_parse_json` allow callers to fall back to a Markdown
+    response.
     """
     try:
         parsed = json.loads(_unfence_json(text))
@@ -620,8 +618,9 @@ def _parse_page_json(text: str) -> dict | None:
 def _page_fields(raw: str) -> tuple[str, str, dict | None]:
     """Map a page LLM response to ``(brief, content, obj)``.
 
-    - JSON object (or a single-element ``[{...}]`` array): brief/content come
-      from it and ``obj`` is the dict (entity callers read ``type`` from it).
+    - JSON object (or a single-element ``[{...}]`` array): accept a single-line
+      brief and string content. Invalid fields default to empty strings.
+      ``obj`` is the dict (entity callers read ``type`` from it).
     - Valid JSON of the wrong shape (multi/empty array, scalar): ``("", "",
       None)`` — the empty content makes ``_require_nonempty_content`` skip the
       page rather than persisting the raw JSON text as its body.

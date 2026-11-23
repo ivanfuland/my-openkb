@@ -47,15 +47,11 @@ def _fsync_file(path: Path) -> None:
 def _hardlink_or_copy(src: str, dst: str) -> None:
     """``copytree`` copy_function that hardlinks (O(1), shares the inode).
 
-    Used for directory backups the caller has marked hardlink-safe — trees
-    whose writers all go through atomic temp+replace (so the live file moves
-    to a new inode) or that are append-only across documents. The hardlink
-    backup then keeps pointing at the old inode while the live tree is
-    mutated, so rollback restores the pre-mutation bytes without copying them
-    up front. Falls back to a real copy on EXDEV/EPERM/EACCES — cross-device,
-    a filesystem that forbids hardlinks, or (Windows) an ACL / cloud-sync
-    folder (OneDrive/Dropbox) that blocks CREATE_HARD_LINK. If the copy also
-    fails it surfaces the real error.
+    Used for directories the caller has marked hardlink-safe. See
+    :func:`snapshot_paths` for the writer contract. Falls back to a real copy
+    on EXDEV/EPERM/EACCES, which can occur across filesystems or when the
+    filesystem or a Windows ACL disallows hardlinks. If the copy also fails,
+    it surfaces the real error.
     """
     src_path = Path(src)
     dst_path = Path(dst)
@@ -320,13 +316,10 @@ def snapshot_paths(
 ) -> MutationSnapshot:
     """Snapshot final KB paths before a mutation starts.
 
-    ``hardlink_dirs`` marks directories whose backup may be hardlinks instead
-    of copies (O(1), no per-file byte copy). A directory is only safe to list
-    here if every writer into it is either atomic temp+replace (new inode, so
-    the hardlink backup keeps the old bytes) or append-only. This is the
-    required caller contract for hardlinked dirs; any in-place writer into one
-    of those trees would silently corrupt the backup and make rollback a no-op
-    for that file.
+    ``hardlink_dirs`` marks directories whose files can be backed up without
+    copying their bytes. The mutation may add files, unlink them, or replace
+    them atomically with new inodes. It must leave shared inodes intact.
+    In-place writes would corrupt the backup as well as the live file.
     """
     kb_dir = kb_dir.resolve()
     hardlink_resolved = {p.resolve() for p in (hardlink_dirs or ())}

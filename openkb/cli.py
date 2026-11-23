@@ -1123,6 +1123,11 @@ def add(ctx, path, from_pageindex_cloud):
     Alternatively, pass --from-pageindex-cloud <DOC_ID> to import a document
     that is already indexed in PageIndex Cloud, with no local file. Requires
     the PAGEINDEX_API_KEY environment variable.
+
+    When a buffered topic becomes a page, OpenKB adds links to it from
+    the contributing document summaries, including earlier ones. If the
+    model truncates a short document's summary rewrite, OpenKB uses the
+    initial summary.
     """
     kb_dir = _find_kb_dir(ctx.obj.get("kb_dir_override"))
     if kb_dir is None:
@@ -1587,6 +1592,8 @@ def _execute_remove_plan(
         wiki / "log.md",
         kb_dir / ".openkb" / "hashes.json",
     ]
+    # Use the same scan as the mutator so rollback covers body-only mentions
+    # that the frontmatter-based preview omits.
     for page_dir in ("concepts", "entities"):
         paths.extend(
             path for path, _ in iter_topic_pages_referencing_doc(wiki / page_dir, plan.doc_name)
@@ -1626,14 +1633,12 @@ def _apply_remove_plan(
     *,
     keep_empty: bool,
 ) -> RemoveResult:
-    """Carry out a remove plan. Registry write is the commit point.
+    """Apply the removal under the caller's active mutation journal.
 
-    Every step before ``registry.remove_by_hash`` is idempotent, so a
-    PageIndex failure leaves the entry (with its ``doc_id``) intact for a
-    retry. The ``lint --fix`` scope is limited to the pages this remove
-    actually touched (modified concept + entity pages ∪ index.md) so the
-    sweep doesn't strip pre-existing dangling links in unrelated pages
-    (issue #58).
+    Steps before registry removal are safe to retry. If PageIndex cleanup
+    fails, its doc_id stays in the registry for that retry. Scope link repair
+    to modified topic pages and the index to preserve unrelated pages with
+    pre-existing dangling links.
     """
     from openkb.agent.compiler import (
         remove_doc_from_concept_pages,
@@ -1816,13 +1821,19 @@ def remove(ctx, identifier, keep_raw, keep_empty, dry_run, yes):
     IDENTIFIER may be the original filename ("paper.pdf"), the doc_name
     slug ("paper-a1b2c3d4e5f6"), or a substring that uniquely matches one.
 
-    Deletes the doc's summary and source files, prunes the doc from
-    concept- and entity-page frontmatter and Related Documents sections,
-    drops the Documents entry from index.md, removes the hash entry, and
-    finally runs `lint --fix` to clean any dangling wikilinks.
-
+    Deletes the doc's summary and source files, removes its citations from
+    concept and entity pages, and cleans up the index and hash entry.
+    Wikilink repair is limited to modified topic pages and the index.
     Concept and entity pages whose only source was this doc are deleted by
-    default; use --keep-empty to retain them.
+    default. Use --keep-empty to retain them.
+
+    Removes the document's buffered concept and entity notes and drops
+    topics left with no notes. The preview shows the purge count when
+    matching notes exist. If the pending-topic store is invalid or
+    unreadable, OpenKB logs a warning and skips that cleanup.
+
+    The preview classifies topic-page edits by frontmatter sources.
+    Removal can also clean up citations that appear only in page bodies.
     """
     from openkb.state import HashRegistry
 
@@ -2198,8 +2209,15 @@ def consolidate(ctx, page_name, all_pages, min_notes, dry_run, yes):
     selected, unless you pass ``--yes``.
 
     Consolidation replaces the entire Markdown body, including existing prose
-    and manual edits. It preserves frontmatter, except that it can refresh
-    ``description:``.
+    and manual edits. OpenKB requires a valid YAML mapping in the frontmatter
+    and rejects truncated responses or rewrites with no usable body.
+    OpenKB accepts a replacement description only when the model supplies a
+    nonempty, single-line string, then updates the frontmatter and the entry
+    in wiki/index.md together.
+
+    The final counts distinguish consolidated, skipped, and failed pages.
+    The command exits with status 1 if any page fails. Successful rewrites
+    in the same batch are retained.
     """
     from openkb.agent import consolidator
 
@@ -2734,7 +2752,11 @@ async def run_lint(kb_dir: Path) -> Path | None:
 )
 @click.pass_context
 def lint(ctx, fix):
-    """Lint the knowledge base for structural and semantic inconsistencies."""
+    """Lint the knowledge base for structural and semantic inconsistencies.
+
+    With --fix, links accepted by the broken-link check are preserved,
+    including links to an existing wiki page by filename stem alone.
+    """
     kb_dir = _find_kb_dir(ctx.obj.get("kb_dir_override"))
     if kb_dir is None:
         click.echo("No knowledge base found. Run `openkb init` first.")

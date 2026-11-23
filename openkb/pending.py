@@ -29,10 +29,10 @@ def pending_topics_path(kb_dir: Path) -> Path:
 class PendingTopicsStore:
     """Persistent buffer of not-yet-paged concept/entity candidates.
 
-    Persisted as ``kb_dir/.openkb/pending_topics.json`` (same directory
-    convention as ``state.HashRegistry``'s ``hashes.json``). Callers already
-    hold the KB's exclusive lock (``@_with_kb_lock`` wraps every `add`/
-    `add-all` run in ``cli.py``), so no additional locking is needed here.
+    Persisted as ``kb_dir/.openkb/pending_topics.json`` alongside the hash
+    registry. Callers must hold the KB's exclusive lock across load and
+    mutation. Loading rejects invalid data so a later write cannot silently
+    replace the buffer with an empty store.
     """
 
     def __init__(self, path: Path) -> None:

@@ -90,7 +90,8 @@ def _failure_target(details: dict) -> str:
 
 
 def _pending_promotion_paths(kb_dir: Path) -> list[Path]:
-    # Take the snapshot even when pending_topics.json doesn't exist yet.
+    # Promotion can edit earlier summaries as well as the current document.
+    # Snapshot an absent store too so rollback removes any newly buffered notes.
     pending_path = pending_topics_path(kb_dir)
     summaries = kb_dir / "wiki" / "summaries"
     store = PendingTopicsStore(pending_path)

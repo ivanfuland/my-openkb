@@ -70,7 +70,8 @@ def strip_ghost_wikilinks(
 
     For each ``[[X]]`` or ``[[X|alias]]`` in ``content``:
 
-    - If ``X`` is in ``known_targets`` exactly, the link is kept as-is.
+    - If ``X`` is in ``known_targets`` after trimming surrounding whitespace
+      and slashes, the link is kept as-is.
     - Otherwise, ``X`` is normalized (see :func:`_normalize_target`) and
       matched against the normalized form of each known target. On a hit,
       the link is rewritten to the canonical target form.
@@ -194,9 +195,9 @@ def fix_broken_links(
 
     For each Markdown page under ``wiki`` (excluding ``reports/`` and
     ``sources/`` and excluded files), runs :func:`strip_ghost_wikilinks`
-    against the set of valid targets currently on disk. Targets that match
-    fuzzily (case, ``_`` vs ``-``, NFKC) are rewritten to canonical form;
-    targets that have no match are demoted to plain text.
+    against the same page keys used by :func:`find_broken_links`. Targets
+    that match fuzzily (case, ``_`` vs ``-``, NFKC) are rewritten to canonical
+    form. Targets that have no match are demoted to plain text.
 
     Args:
         wiki: Path to the wiki root directory.

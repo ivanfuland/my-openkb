@@ -145,11 +145,10 @@ async def consolidate_page(
 ) -> bool:
     """Fold ``page_dir/slug``'s pending notes into curated prose.
 
-    Returns ``False`` (no-op, no LLM call) when the page has no ``## Notes``
-    section. Raises on LLM/parse failure — the CLI command treats a raised
-    exception for one page as a per-page failure, not a whole-batch abort
-    (mirrors ``recompile``). Async so the CLI can consolidate several pages
-    concurrently, the same way concept/entity generation does during ingest.
+    Returns ``False`` without an LLM call when the Notes section is absent
+    or empty. Frontmatter validation, generation, and publication can raise.
+    An accepted description change journals the page and index together so
+    a failed index write can restore both files.
     """
     from openkb.agent import compiler as _compiler
 
