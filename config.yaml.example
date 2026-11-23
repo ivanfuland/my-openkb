@@ -2,11 +2,10 @@ model: gpt-5.4                   # LLM model (any LiteLLM-supported provider)
 language: en                     # Wiki output language
 pageindex_threshold: 20          # PDF pages threshold for PageIndex
 
-# Optional compilation settings (shown with their defaults).
-# Set rewrite to have the LLM rewrite existing concept/entity pages.
-# concept_update_mode: append
-# Set false to allow longer names and map unknown entity types to other.
-# strict_item_mode: true
+# Optional compilation settings (shown with their defaults). See
+# README.md#compilation-settings for behavior and trade-offs.
+# concept_update_mode: append  # opt out with rewrite
+# strict_item_mode: true       # opt out with false
 
 # Optional: cap concurrent LLM calls during ingest (PageIndex indexing and
 # concept/entity compilation — they never overlap, so one setting covers

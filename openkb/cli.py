@@ -1886,10 +1886,8 @@ def recompile(ctx, doc_name, all_docs, dry_run, yes, refresh_schema):
     """Re-run the current compile pipeline on already-indexed documents.
 
     Recompiling re-runs the same ``compile_short_doc`` / ``compile_long_doc``
-    that ``openkb add`` uses, so pre-feature KBs gain the ``entities/`` layer
-    and pages refresh to the current format. It does NOT re-run PageIndex or
-    re-convert raw files — it reuses the on-disk ``wiki/sources/`` and
-    ``wiki/summaries/`` content (and the registry's PageIndex ``doc_id``).
+    that ``openkb add`` uses. It reuses the on-disk ``wiki/sources/`` and
+    ``wiki/summaries/`` content and the registry's PageIndex ``doc_id``.
 
     DOC_NAME recompiles one doc (resolved like ``openkb remove`` — filename,
     slug, or unique substring). ``--all`` recompiles every indexed doc.

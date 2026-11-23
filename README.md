@@ -183,7 +183,7 @@ OpenKB commands fall into two layers: the **wiki foundation** (compile + manage 
 | Command                                                            | Description                                                                                                                                                                                                                          |
 | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | <code>openkb&nbsp;remove&nbsp;&lt;doc&gt;</code>                   | Remove a document and clean up its wiki pages, images, registry, and PageIndex state (`--dry-run` to preview, `--keep-raw` / `--keep-empty` to retain artifacts)                                                                     |
-| <code>openkb&nbsp;recompile&nbsp;[&lt;doc&gt;]&nbsp;[--all]</code> | Re-run compilation without re-indexing. Can overwrite manual edits. Preview with `--dry-run` (`openkb recompile --help` for details). |
+| <code>openkb&nbsp;recompile&nbsp;[&lt;doc&gt;]&nbsp;[--all]</code> | Re-run compilation without re-indexing. Regenerates short-document summaries and replaces manual edits to them. Preview with `--dry-run`. For concept and entity updates, see [Compilation settings](#compilation-settings). |
 | <code>openkb&nbsp;consolidate&nbsp;&lt;page&gt;</code> or `openkb consolidate --all` | Fold accumulated notes into prose by rewriting each selected page body. Preview with `--dry-run` (`openkb consolidate --help` for details). |
 | <code>openkb&nbsp;feedback&nbsp;["msg"]</code>                     | File feedback by opening a prefilled GitHub issue (`--type bug/feature/question` to tag it)                                                                                                                                          |
 
@@ -265,9 +265,11 @@ Set these options in the knowledge base's `.openkb/config.yaml`.
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `concept_update_mode` | `append` | Adds a dated, source-linked entry under `## Notes` to concept and entity pages without sending the existing body to the LLM. New pages start with their buffered notes. Set `rewrite` to send the existing page to the LLM for a full rewrite. See `openkb consolidate --help` to fold notes into prose. |
+| `concept_update_mode` | `append` | Adds or replaces the document’s dated, source-linked entry under `## Notes` on concept and entity pages, preserving existing prose. The LLM generates the note from document context independently of the existing page body. New pages start with their buffered notes. Set `rewrite` to send the existing page to the LLM for a full rewrite that can overwrite manual edits. See `openkb consolidate --help` to fold notes into prose. |
 | `strict_item_mode` | `true` | Rejects `create` proposals for concepts and entities with names longer than three words, counting hyphens and underscores as separators. It also rejects entity `create` proposals with a type outside `entity_types`. OpenKB logs these drops as warnings. Set `false` to allow longer names and coerce unknown entity types to `other`. |
 | `briefs_budget_chars` | `120000` | Caps brief entries separately for concepts and entities in the planning prompt. Each list starts with the most-cited existing pages, then includes pending topics as space allows. The prompt discloses omissions. Set `0` to disable trimming. |
+
+For `concept_update_mode` and `strict_item_mode`, OpenKB logs a warning and uses the default if the configured value is invalid.
 
 In both update modes, a new topic stays in the pending buffer until the compiler
 has collected notes about it from three distinct documents. Recompiling the
