@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1594,6 +1594,17 @@ def _backlink_entities(wiki_dir: Path, doc_name: str, entity_slugs: list[str]) -
     _backlink_pages(wiki_dir, doc_name, entity_slugs, page_dir="entities")
 
 
+def iter_topic_pages_referencing_doc(pages_dir: Path, doc_name: str) -> Iterator[tuple[Path, str]]:
+    """Yield topic pages containing the document's summary path, with or without .md."""
+    if not pages_dir.is_dir():
+        return
+    bare_source = f"summaries/{doc_name}"
+    for path in sorted(pages_dir.glob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        if bare_source in text:
+            yield path, text
+
+
 def _remove_doc_from_pages(
     wiki_dir: Path,
     doc_name: str,
@@ -1603,8 +1614,7 @@ def _remove_doc_from_pages(
 ) -> dict[str, list[str]]:
     """Update or delete pages in ``page_dir`` affected by removing a document.
 
-    For each ``{page_dir}/*.md`` whose frontmatter ``sources:`` lists
-    ``summaries/{doc_name}``:
+    For each ``{page_dir}/*.md`` that references ``summaries/{doc_name}``:
 
     - Remove that source from the frontmatter list.
     - Remove any ``- [[summaries/{doc_name}]]`` entries from the
@@ -1622,10 +1632,6 @@ def _remove_doc_from_pages(
 
     Returns ``{"modified": [slugs...], "deleted": [slugs...]}``.
     """
-    pages_dir = wiki_dir / page_dir
-    if not pages_dir.is_dir():
-        return {"modified": [], "deleted": []}
-
     source_file = f"summaries/{doc_name}.md"
     bare_source = f"summaries/{doc_name}"
     link = f"[[{bare_source}]]"
@@ -1633,12 +1639,7 @@ def _remove_doc_from_pages(
     modified: list[str] = []
     deleted: list[str] = []
 
-    for path in sorted(pages_dir.glob("*.md")):
-        text = path.read_text(encoding="utf-8")
-        # Cheap filter: skip pages that don't reference the doc at all.
-        if source_file not in text and bare_source not in text:
-            continue
-
+    for path, text in iter_topic_pages_referencing_doc(wiki_dir / page_dir, doc_name):
         new_text, sources_empty = _remove_source_from_frontmatter(text, source_file)
 
         # Drop the doc's entry from the "## Related Documents" section.

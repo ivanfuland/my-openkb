@@ -1404,7 +1404,6 @@ class RemovePlan:
     actions: list[RemoveAction]
     concept_deletes: list[str]
     entity_deletes: list[str]
-    touched_topics: list[Path]
     pending_note_count: int
     raw_path: Path | None
     cleanup_pageindex: bool
@@ -1452,10 +1451,9 @@ def _build_remove_plan(
     keep_raw: bool,
     keep_empty: bool,
 ) -> RemovePlan:
-    """Scan the KB and predict every file remove will touch (no writes).
+    """Preview removal without writing to the KB.
 
-    Only frontmatter ``sources:`` membership drives the delete/edit
-    classification so the plan reflects what the executor will actually do.
+    Topic-page actions are classified by frontmatter ``sources:`` membership.
     """
     from openkb.agent.compiler import scan_affected_pages
 
@@ -1562,10 +1560,6 @@ def _build_remove_plan(
         actions=actions,
         concept_deletes=concept_deletes,
         entity_deletes=entity_deletes,
-        touched_topics=[
-            *(wiki_dir / "concepts" / f"{slug}.md" for slug, _ in affected_concepts),
-            *(wiki_dir / "entities" / f"{slug}.md" for slug, _ in affected_entities),
-        ],
         pending_note_count=pending_note_count,
         raw_path=raw_path,
         cleanup_pageindex=cleanup_pageindex,
@@ -1581,17 +1575,22 @@ def _execute_remove_plan(
     kb_dir: Path, plan: RemovePlan, registry, *, keep_empty: bool
 ) -> RemoveResult:
     """Journal local wiki and registry changes, including pending notes."""
+    from openkb.agent.compiler import iter_topic_pages_referencing_doc
+
     wiki = kb_dir / "wiki"
     paths = [
         plan.summary_path,
         plan.source_md,
         plan.source_json,
         plan.images_dir,
-        *plan.touched_topics,
         wiki / "index.md",
         wiki / "log.md",
         kb_dir / ".openkb" / "hashes.json",
     ]
+    for page_dir in ("concepts", "entities"):
+        paths.extend(
+            path for path, _ in iter_topic_pages_referencing_doc(wiki / page_dir, plan.doc_name)
+        )
     if plan.raw_path is not None:
         paths.append(plan.raw_path)
     pending_path = pending_topics_path(kb_dir)
