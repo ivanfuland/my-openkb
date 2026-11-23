@@ -2577,6 +2577,53 @@ class TestPendingBufferLifecycle:
         store = PendingTopicsStore(tmp_path / ".openkb" / "pending_topics.json")
         assert store.get(kind, "flaky-timeout") is None
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["concepts", "entities"])
+    @pytest.mark.parametrize("mode", ["append", "rewrite"])
+    async def test_promotion_failure_preserves_buffer(
+        self, tmp_path, monkeypatch, caplog, kind, mode
+    ):
+        wiki = self._setup_wiki(tmp_path)
+        slug = "flaky-timeout"
+        brief = "A recurring timeout bug"
+        _seed_pending(tmp_path, kind, slug, brief)
+        plan = json.dumps({kind: {"create": [{"name": slug, "type": "event"}]}})
+        complete_note = _mock_acompletion([json.dumps({"description": brief, "note": "new note"})])
+        responses = [await complete_note()]
+        if mode == "rewrite":
+            responses.append(RuntimeError("promotion failed"))
+        else:
+            monkeypatch.setattr(
+                "openkb.agent.compiler_notes.atomic_write_text",
+                MagicMock(side_effect=OSError("promotion failed")),
+            )
+
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.completion = MagicMock(side_effect=_mock_completion([plan]))
+            mock_litellm.acompletion = AsyncMock(side_effect=responses)
+            await _compile_concepts(
+                wiki,
+                tmp_path,
+                "gpt-4o-mini",
+                {"role": "system", "content": "s"},
+                {"role": "user", "content": "d"},
+                "summary",
+                "new-doc",
+                5,
+                concept_update_mode=mode,
+            )
+
+        assert "promotion failed" in caplog.text
+        assert not (wiki / kind / f"{slug}.md").exists()
+        store = PendingTopicsStore(tmp_path / ".openkb" / "pending_topics.json")
+        entry = store.get(kind, slug)
+        assert entry is not None
+        assert [(note["source_file"], note["note"]) for note in entry["notes"]] == [
+            ("summaries/prior-doc-0.md", "prior note 0"),
+            ("summaries/prior-doc-1.md", "prior note 1"),
+            ("summaries/new-doc.md", "new note"),
+        ]
+
 
 class TestBriefIntegration:
     @pytest.mark.asyncio

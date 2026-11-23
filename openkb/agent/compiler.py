@@ -2488,7 +2488,6 @@ async def _compile_concepts(
         new_count = pending_store.add_note("concepts", slug, brief, doc_name, source_file, note)
         if new_count <= MAX_NOTES_BEFORE_PROMOTION:
             return  # still buffering — no page yet
-        pending_store.remove("concepts", slug)
         if concept_update_mode == "append":
             for n in prior_notes:
                 compiler_notes.append_concept_note(
@@ -2497,6 +2496,7 @@ async def _compile_concepts(
             compiler_notes.append_concept_note(
                 wiki_dir, name, note, source_file, doc_name, description=brief
             )
+            pending_store.remove("concepts", slug)
             return slug, brief
         _, content, _, brief2 = await _gen_create(concept, extra_context=note_extra_context)
         cleaned, ghosts = strip_ghost_wikilinks(content, known_targets)
@@ -2513,6 +2513,7 @@ async def _compile_concepts(
         for n in prior_notes:
             existing = _prepend_source_to_frontmatter(existing, n["source_file"])
         atomic_write_text(path, existing)
+        pending_store.remove("concepts", slug)
         return slug, brief2
 
     async def _gen_pending_entity(ent: dict) -> tuple[str, str, str] | None:
@@ -2553,7 +2554,6 @@ async def _compile_concepts(
         )
         if new_count <= MAX_NOTES_BEFORE_PROMOTION:
             return  # still buffering — no page yet
-        pending_store.remove("entities", slug)
         if concept_update_mode == "append":
             for n in prior_notes:
                 compiler_notes.append_entity_note(
@@ -2568,6 +2568,7 @@ async def _compile_concepts(
             compiler_notes.append_entity_note(
                 wiki_dir, name, note, source_file, doc_name, description=brief, type_=etype
             )
+            pending_store.remove("entities", slug)
             return slug, brief, etype
         _, content, brief2, etype_out = await _gen_entity_create(
             ent, extra_context=note_extra_context
@@ -2586,6 +2587,7 @@ async def _compile_concepts(
         for n in prior_notes:
             existing = _prepend_source_to_frontmatter(existing, n["source_file"])
         atomic_write_text(path, existing)
+        pending_store.remove("entities", slug)
         return slug, brief2, etype_out
 
     tasks = []
