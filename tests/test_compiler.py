@@ -230,8 +230,7 @@ class TestMaxWordsFilter:
     """Hard cap on brand-new concept/entity names to 3 words (see
     compiler._count_words / issue #247) — a lightweight proxy for "too
     specific to be reusable knowledge". Both concepts and entities only
-    enforce it when strict=True (opt-in together with strict_item_mode,
-    see issue #247 follow-up)."""
+    enforce it when strict=True (controlled by strict_item_mode)."""
 
     def test_count_words_splits_on_hyphen_underscore_and_space(self):
         assert _count_words("attention") == 1
@@ -249,9 +248,7 @@ class TestMaxWordsFilter:
         assert [c["name"] for c in out] == ["attention"]
 
     def test_concept_items_over_limit_kept_when_not_strict(self):
-        # The word-length gate is opt-in together with strict_item_mode —
-        # passing max_words alone must not drop anything unless strict=True
-        # is also set.
+        # With strict=False, names can exceed max_words.
         items = [
             {"name": "attention", "title": "Attention"},
             {"name": "andreas-mueller-alwart-ssmpa-2573", "title": "Andreas"},
@@ -283,9 +280,7 @@ class TestMaxWordsFilter:
         assert [e["name"] for e in out] == ["nvidia"]
 
     def test_entity_items_over_limit_kept_when_not_strict(self):
-        # The word-length gate is opt-in together with strict_item_mode —
-        # passing max_words alone must not drop anything unless strict=True
-        # is also set.
+        # With strict=False, names can exceed max_words.
         items = [
             {"name": "nvidia", "title": "NVIDIA", "type": "organization"},
             {"name": "andreas-mueller-alwart-ssmpa-2573", "title": "Andreas", "type": "person"},
@@ -357,8 +352,7 @@ class TestParseEntitiesPlanStrictAndMaxWords:
         assert out["update"][0]["type"] == "other"  # coerced, not strict-dropped
 
     def test_create_max_words_ignored_without_strict(self):
-        # The name-length gate is opt-in together with strict_item_mode —
-        # passing max_words without strict=True must not drop long names.
+        # With strict=False, names can exceed max_words.
         valid = frozenset({"person", "other"})
         parsed = {
             "entities": {
@@ -1422,6 +1416,7 @@ class TestCompileShortDoc:
         source_path = wiki / "sources" / "test-doc.md"
         source_path.write_text("# Test Doc\n\nSome content about transformers.", encoding="utf-8")
         (tmp_path / ".openkb").mkdir()
+        (tmp_path / ".openkb" / "config.yaml").write_text("concept_update_mode: rewrite\n")
         (tmp_path / "raw").mkdir()
         (tmp_path / "raw" / "test-doc.pdf").write_bytes(b"fake")
 
@@ -1481,7 +1476,9 @@ class TestCompileShortDoc:
         # Verify concept written
         concept_path = wiki / "concepts" / "transformer.md"
         assert concept_path.exists()
-        assert '"summaries/test-doc.md"' in concept_path.read_text()
+        concept_text = concept_path.read_text()
+        assert '"summaries/test-doc.md"' in concept_text
+        assert "A neural network architecture." in concept_text
 
         # Verify index updated
         index_text = (wiki / "index.md").read_text()
@@ -1489,11 +1486,8 @@ class TestCompileShortDoc:
         assert "[[concepts/transformer]]" in index_text
 
     @pytest.mark.asyncio
-    async def test_append_mode_full_pipeline_writes_note_not_full_page(self, tmp_path):
-        """concept_update_mode="append" end-to-end, through the SAME mocked
-        acompletion path as the "rewrite" pipeline above — proves the note
-        closures work under this branch's _llm_call_page_async.
-        """
+    async def test_default_mode_full_pipeline_writes_buffered_notes(self, tmp_path):
+        """Promotion in the default mode writes the buffered notes directly."""
         wiki = tmp_path / "wiki"
         (wiki / "sources").mkdir(parents=True)
         (wiki / "summaries").mkdir(parents=True)
@@ -1505,9 +1499,6 @@ class TestCompileShortDoc:
         source_path = wiki / "sources" / "test-doc.md"
         source_path.write_text("# Test Doc\n\nA support ticket about approvals.", encoding="utf-8")
         (tmp_path / ".openkb").mkdir()
-        (tmp_path / ".openkb" / "config.yaml").write_text(
-            "concept_update_mode: append\n", encoding="utf-8"
-        )
 
         summary_response = json.dumps(
             {"description": "A ticket about approvals", "content": "# Summary\n\nApproval ticket."}
@@ -1546,6 +1537,29 @@ class TestCompileShortDoc:
         assert "This ticket reports a timeout during approval." in text
         assert 'description: "How approvals are routed."' in text
         assert '"summaries/test-doc.md"' in text
+
+    @pytest.mark.asyncio
+    async def test_kb_can_disable_strict_item_mode(self, kb_dir):
+        source = kb_dir / "wiki" / "sources" / "test-doc.md"
+        source.write_text("Notes about a specialized supplier.", encoding="utf-8")
+        (kb_dir / ".openkb" / "config.yaml").write_text(
+            "strict_item_mode: false\n", encoding="utf-8"
+        )
+        slug = "specialized-regional-parts-supplier"
+        plan = json.dumps({"entities": {"create": [{"name": slug, "type": "invalid"}]}})
+        summary = "# Summary\n\nA document about a supplier."
+        note = json.dumps({"description": "Parts supplier", "note": "Supplies parts locally."})
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.completion = MagicMock(
+                side_effect=_mock_completion([summary, plan, summary])
+            )
+            mock_litellm.acompletion = AsyncMock(side_effect=_mock_acompletion([note]))
+            await compile_short_doc("test-doc", source, kb_dir, "gpt-4o-mini")
+
+        store = PendingTopicsStore(kb_dir / ".openkb" / "pending_topics.json")
+        entry = store.get("entities", slug)
+        assert entry is not None
+        assert entry["type"] == "other"
 
     @pytest.mark.asyncio
     async def test_handles_bad_json(self, tmp_path):
@@ -1827,6 +1841,7 @@ class TestCacheControl:
         src = wiki / "sources" / "doc.md"
         src.write_text("Body text about caching.", encoding="utf-8")
         (tmp_path / ".openkb").mkdir()
+        (tmp_path / ".openkb" / "config.yaml").write_text("concept_update_mode: rewrite\n")
 
         summary_response = json.dumps({"brief": "B", "content": "summary body"})
         plan_response = json.dumps(
@@ -1979,7 +1994,9 @@ class TestCompileLongDoc:
         summary_path.write_text("# Big Doc\n\nPageIndex summary tree.", encoding="utf-8")
         openkb_dir = tmp_path / ".openkb"
         openkb_dir.mkdir()
-        (openkb_dir / "config.yaml").write_text("model: gpt-4o-mini\n")
+        (openkb_dir / "config.yaml").write_text(
+            "model: gpt-4o-mini\nconcept_update_mode: rewrite\n", encoding="utf-8"
+        )
         (tmp_path / "raw").mkdir()
         (tmp_path / "raw" / "big-doc.pdf").write_bytes(b"fake")
 
@@ -2105,6 +2122,7 @@ class TestCompileConceptsPlan:
                 summary,
                 "test-doc",
                 5,
+                concept_update_mode="rewrite",
             )
 
         # Verify flash-attention created
@@ -2120,6 +2138,7 @@ class TestCompileConceptsPlan:
         att_text = att_path.read_text()
         assert "summaries/test-doc.md" in att_text
         assert "old-paper.pdf" in att_text
+        assert "Updated content with new info." in att_text
 
         # Verify index updated
         index_text = (wiki / "index.md").read_text()
@@ -2167,6 +2186,7 @@ class TestCompileConceptsPlan:
                 "summary",
                 "test-doc",
                 5,
+                concept_update_mode="rewrite",
             )
         path = wiki / "concepts" / "attention.md"
         assert path.exists(), "single-object array should be unwrapped and written"
@@ -2208,6 +2228,7 @@ class TestCompileConceptsPlan:
                 "summary",
                 "test-doc",
                 5,
+                concept_update_mode="rewrite",
             )
         text = (wiki / "concepts" / "attention.md").read_text()
         assert "Complete original body." in text, "existing page must survive a truncated update"
@@ -2222,8 +2243,12 @@ class TestCompileConceptsPlan:
             {"create": [{"name": "ghost", "title": "Ghost"}], "update": [], "related": []}
         )
         truncated_page = json.dumps({"brief": "x", "content": "# Ghost\n\nPartial"})
+        complete_note = _mock_acompletion([json.dumps({"description": "x", "note": "seen"})])
+        _seed_pending(tmp_path, "concepts", "ghost", "Ghost")
 
         async def truncated_acompletion(*args, **kwargs):
+            if "NEW concept page" in _message_text(kwargs["messages"]):
+                return await complete_note()
             mock_resp = MagicMock()
             mock_resp.choices = [MagicMock()]
             mock_resp.choices[0].message.content = truncated_page
@@ -2244,7 +2269,9 @@ class TestCompileConceptsPlan:
                 "summary",
                 "test-doc",
                 5,
+                concept_update_mode="rewrite",
             )
+            assert mock_litellm.acompletion.await_count == 2
         assert not (wiki / "concepts" / "ghost.md").exists(), "truncated create must be skipped"
 
     def test_page_fields_maps_response_shapes(self):
@@ -2313,6 +2340,7 @@ class TestCompileConceptsPlan:
                 "summary",
                 "test-doc",
                 5,
+                concept_update_mode="rewrite",
             )
         text = (wiki / "entities" / "google.md").read_text()
         assert "Complete original entity body." in text, "existing entity must survive truncation"
@@ -2333,6 +2361,8 @@ class TestCompileConceptsPlan:
         )
         # Parseable JSON, but empty content — old code fell back to raw JSON.
         empty_content_response = json.dumps({"brief": "B", "content": ""})
+        note_response = json.dumps({"description": "B", "note": "seen in test-doc"})
+        _seed_pending(tmp_path, "concepts", "ghost-concept", "Ghost Concept")
 
         system_msg = {"role": "system", "content": "You are a wiki agent."}
         doc_msg = {"role": "user", "content": "Document content."}
@@ -2340,7 +2370,12 @@ class TestCompileConceptsPlan:
         with patch("openkb.agent.compiler.litellm") as mock_litellm:
             mock_litellm.completion = MagicMock(side_effect=_mock_completion([plan_response]))
             mock_litellm.acompletion = AsyncMock(
-                side_effect=_mock_completion([empty_content_response])
+                side_effect=_routed_acompletion(
+                    [
+                        ("NEW concept page", note_response),
+                        ("Write the concept page for", empty_content_response),
+                    ]
+                )
             )
             await _compile_concepts(
                 wiki,
@@ -2351,7 +2386,9 @@ class TestCompileConceptsPlan:
                 "Summary.",
                 "test-doc",
                 5,
+                concept_update_mode="rewrite",
             )
+            assert mock_litellm.acompletion.await_count == 2
 
         # The concept page must NOT be written (generation raised + dropped).
         page = wiki / "concepts" / "ghost-concept.md"
@@ -2447,6 +2484,7 @@ class TestCompileConceptsPlan:
                 summary,
                 "test-doc",
                 5,
+                concept_update_mode="rewrite",
             )
 
         # Verify concept was created (not updated)
@@ -2514,6 +2552,7 @@ class TestPendingBufferLifecycle:
                     "summary",
                     f"doc-{i}",
                     5,
+                    concept_update_mode="rewrite",
                 )
             if i < 3:
                 assert not path.exists(), f"should not promote after mention {i}"
@@ -2521,6 +2560,7 @@ class TestPendingBufferLifecycle:
                 assert path.exists(), "should promote on the 3rd mention"
 
         text = path.read_text(encoding="utf-8")
+        assert "Details." in text
         assert '"summaries/doc-1.md"' in text
         assert '"summaries/doc-2.md"' in text
         assert '"summaries/doc-3.md"' in text
@@ -2639,6 +2679,7 @@ class TestBriefIntegration:
         source_path = wiki / "sources" / "test-doc.md"
         source_path.write_text("# Test Doc\n\nContent.", encoding="utf-8")
         (tmp_path / ".openkb").mkdir()
+        (tmp_path / ".openkb" / "config.yaml").write_text("concept_update_mode: rewrite\n")
         (tmp_path / "raw").mkdir()
         (tmp_path / "raw" / "test-doc.pdf").write_bytes(b"fake")
 
@@ -3535,12 +3576,12 @@ class TestBriefsBudget:
         assert "list omitted: 2" in read_briefs(tmp_path, 1, pending_lines=pending)
 
     @pytest.mark.asyncio
-    async def test_budgeted_plan_with_strict_buffer_append_and_consolidate(self, kb_dir):
+    async def test_budgeted_plan_with_default_modes_and_consolidate(self, kb_dir):
         wiki = kb_dir / "wiki"
         source = wiki / "sources" / "new-doc.md"
         source.write_text("A new document about changing approval rules.", encoding="utf-8")
         (kb_dir / ".openkb" / "config.yaml").write_text(
-            "concept_update_mode: append\nstrict_item_mode: true\nbriefs_budget_chars: 140\n",
+            "briefs_budget_chars: 140\n",
             encoding="utf-8",
         )
         self._concept(wiki, "aaa-rare", "r" * 140, n_sources=1)

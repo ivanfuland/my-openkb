@@ -55,6 +55,7 @@ from openkb.config import (
     save_config,
     load_global_config,
     register_kb,
+    resolve_concept_update_mode,
     resolve_concurrency,
     set_extra_headers,
     resolve_parallel_tool_calls,
@@ -1885,19 +1886,17 @@ def recompile(ctx, doc_name, all_docs, dry_run, yes, refresh_schema):
     """Re-run the current compile pipeline on already-indexed documents.
 
     Recompiling re-runs the same ``compile_short_doc`` / ``compile_long_doc``
-    that ``openkb add`` uses, so pre-feature KBs gain the ``entities/`` layer
-    and pages refresh to the current format. It does NOT re-run PageIndex or
-    re-convert raw files — it reuses the on-disk ``wiki/sources/`` and
-    ``wiki/summaries/`` content (and the registry's PageIndex ``doc_id``).
+    that ``openkb add`` uses. It reuses the on-disk ``wiki/sources/`` and
+    ``wiki/summaries/`` content and the registry's PageIndex ``doc_id``.
 
     DOC_NAME recompiles one doc (resolved like ``openkb remove`` — filename,
     slug, or unique substring). ``--all`` recompiles every indexed doc.
     Exactly one of DOC_NAME or ``--all`` is required.
 
     Recompiling regenerates short-document summaries. Existing concept and
-    entity pages follow ``concept_update_mode``. In ``rewrite`` mode the LLM
-    rewrites the page body and can overwrite manual edits. In ``append`` mode
-    OpenKB records source-linked notes for these updates.
+    entity pages follow ``concept_update_mode``. By default (``append``),
+    OpenKB records source-linked notes for these updates. In ``rewrite``
+    mode the LLM rewrites the page body and can overwrite manual edits.
     """
     from openkb.state import HashRegistry
 
@@ -1941,26 +1940,27 @@ def recompile(ctx, doc_name, all_docs, dry_run, yes, refresh_schema):
     def _classify(meta: dict) -> str:
         return "long" if _is_long_doc(meta) else "short"
 
-    # --dry-run: enumerate only, no LLM calls, no writes.
-    if dry_run:
-        click.echo(f"Would recompile {len(targets)} document(s):")
-        for meta in targets:
-            name = meta.get("doc_name") or meta.get("name", "?")
-            click.echo(f"  - {name}  ({_classify(meta)})")
-        click.echo(
-            "\nNote: recompiling regenerates summaries (short docs) and rewrites "
-            "concept pages — manual edits would be overwritten."
-        )
-        click.echo("(dry-run — nothing modified)")
-        return
+    config = resolve_effective_config(kb_dir)[0]
+    if dry_run or (all_docs and not yes):
+        if resolve_concept_update_mode(config) == "rewrite":
+            page_updates = "rewrites concept and entity pages, which can overwrite manual edits."
+        else:
+            page_updates = (
+                "adds or replaces notes under ## Notes on concept and entity pages "
+                "while preserving existing prose."
+            )
+        effects = f"Recompiling regenerates short-document summaries and {page_updates}"
 
-    # --all confirmation (the summary/concept-regeneration side effect).
-    if all_docs and not yes:
-        click.echo(
-            f"This will recompile {len(targets)} document(s), regenerating "
-            "summaries and rewriting concept pages with the current logic.\n"
-            "Manual edits to those pages will be overwritten."
-        )
+        if dry_run:
+            click.echo(f"Would recompile {len(targets)} document(s):")
+            for meta in targets:
+                name = meta.get("doc_name") or meta.get("name", "?")
+                click.echo(f"  - {name}  ({_classify(meta)})")
+            click.echo(f"\nNote: {effects}")
+            click.echo("(dry-run — nothing modified)")
+            return
+
+        click.echo(f"This will recompile {len(targets)} document(s).\n{effects}")
         if not click.confirm("Proceed?", default=False):
             click.echo("Aborted.")
             return
@@ -1969,7 +1969,6 @@ def recompile(ctx, doc_name, all_docs, dry_run, yes, refresh_schema):
         _refresh_schema(wiki_dir)
 
     _setup_llm_key(kb_dir)
-    config = resolve_effective_config(kb_dir)[0]
     model: str = config.get("model", DEFAULT_CONFIG["model"])
     max_concurrency = resolve_concurrency(config) or DEFAULT_COMPILE_CONCURRENCY
 
