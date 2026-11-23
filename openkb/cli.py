@@ -1895,9 +1895,9 @@ def recompile(ctx, doc_name, all_docs, dry_run, yes, refresh_schema):
     Exactly one of DOC_NAME or ``--all`` is required.
 
     Recompiling regenerates short-document summaries. Existing concept and
-    entity pages follow ``concept_update_mode``. In ``rewrite`` mode the LLM
-    rewrites the page body and can overwrite manual edits. In ``append`` mode
-    OpenKB records source-linked notes for these updates.
+    entity pages follow ``concept_update_mode``. By default (``append``),
+    OpenKB records source-linked notes for these updates. In ``rewrite``
+    mode the LLM rewrites the page body and can overwrite manual edits.
     """
     from openkb.state import HashRegistry
 

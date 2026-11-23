@@ -33,6 +33,7 @@ import litellm
 
 from openkb import frontmatter
 from openkb.agent import compiler_notes
+from openkb.compiler_config import DEFAULT_CONCEPT_UPDATE_MODE, DEFAULT_STRICT_ITEM_MODE
 from openkb.config import (
     DEFAULT_ENTITY_TYPES,
     get_extra_headers,
@@ -93,13 +94,9 @@ _ENTITY_TYPES = frozenset(_ENTITY_TYPE_LIST)
 # Hard cap on words in a brand-new concept/entity name (see _count_words) and
 # the token-density constant used to compute the soft per-document "how many
 # brand-new items" guidance substituted into __DOC_TOKEN_GUIDANCE__. Both are
-# intentionally NOT config keys (see issue #247) — the only new config-driven
-# knob in this feature is strict_item_mode. Both concepts and entities only
-# enforce this cap when strict_item_mode=true (see _filter_concept_items /
-# _filter_entity_items) — it opts into a "reject, don't keep" spirit (same
-# as the entity type check), so leaving strict_item_mode off keeps concept
-# and entity name length unrestricted, matching pre-issue-#247 behavior
-# exactly.
+# intentionally fixed. The compiler applies the cap to new concepts and
+# entities under strict_item_mode (enabled by default), alongside the
+# entity type check. See _filter_concept_items and _filter_entity_items.
 _MAX_NAME_WORDS = 3
 _TOKENS_PER_NEW_ITEM = 1000
 
@@ -785,12 +782,10 @@ def _filter_entity_items(
     ``strict`` (see ``config.resolve_strict_item_mode``), when ``True``,
     drops an item whose type falls outside ``valid_types`` instead of coercing
     it to ``"other"``, and additionally enables the ``max_words`` (see
-    :func:`_count_words`) name-length gate — both checks are opt-in together,
-    so leaving ``strict_item_mode`` at its default keeps today's lenient
-    behavior (no type drop, no length drop) exactly. Pass ``max_words`` only
-    for "create" items — an "update" targets an already-existing,
-    already-vetted name/type. Drops are logged at warning level (visible
-    without ``-v``) with a sample of the affected names, never silently.
+    :func:`_count_words`) name-length gate. The compiler applies both checks
+    to "create" items by default. Updates target existing names and types
+    and use this helper's lenient defaults. Drops are logged at warning
+    level (visible without ``-v``) with a sample of the affected names.
     """
     if valid_types is None:
         valid_types = _ENTITY_TYPES
@@ -1885,8 +1880,8 @@ async def _compile_concepts(
     doc_type: str = "short",
     rewrite_summary: bool = False,
     entity_types: list[str] | None = None,
-    concept_update_mode: str = "rewrite",
-    strict_item_mode: bool = False,
+    concept_update_mode: str = DEFAULT_CONCEPT_UPDATE_MODE,
+    strict_item_mode: bool = DEFAULT_STRICT_ITEM_MODE,
     doc_tokens: int | None = None,
     briefs_budget_chars: int | None = None,
     bundle=None,
@@ -1901,13 +1896,12 @@ async def _compile_concepts(
     wikilinks reflect the actual concept pages on disk.
 
     ``concept_update_mode`` (see ``openkb.config.resolve_concept_update_mode``)
-    controls how EXISTING concept/entity pages absorb this document: the
-    default ``"rewrite"`` sends the full page back to the LLM for a rewrite;
-    ``"append"`` generates a short note instead (the LLM never sees the
-    existing page) and appends it via ``openkb.agent.compiler_notes`` — no
-    LLM call for the write itself. On promotion, ``rewrite`` uses the prior
-    notes as context for page generation, while ``append`` writes them as
-    the initial notes on the page.
+    controls how existing concept/entity pages absorb this document. The
+    default ``"append"`` generates a short note without sending the existing
+    page to the LLM and appends it via ``openkb.agent.compiler_notes``.
+    ``"rewrite"`` sends the full page back to the LLM for a rewrite. On
+    promotion, ``append`` writes the buffered notes as the initial notes on
+    the page, while ``rewrite`` uses them as context for page generation.
     """
     source_file = f"summaries/{doc_name}.md"
 

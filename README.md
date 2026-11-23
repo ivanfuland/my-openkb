@@ -265,8 +265,8 @@ Set these options in the knowledge base's `.openkb/config.yaml`.
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `concept_update_mode` | `rewrite` | Applies to concepts and entities. `rewrite` sends the existing page to the LLM to incorporate new material. `append` adds a dated, source-linked entry under `## Notes` without sending the existing body to the LLM. New pages in append mode start with their buffered notes. See `openkb consolidate --help` to fold notes into prose. |
-| `strict_item_mode` | `false` | Rejects `create` proposals for concepts and entities with names longer than three words, counting hyphens and underscores as separators. It also rejects entity `create` proposals with a type outside `entity_types`. OpenKB logs these drops as warnings. |
+| `concept_update_mode` | `append` | Adds a dated, source-linked entry under `## Notes` to concept and entity pages without sending the existing body to the LLM. New pages start with their buffered notes. Set `rewrite` to send the existing page to the LLM for a full rewrite. See `openkb consolidate --help` to fold notes into prose. |
+| `strict_item_mode` | `true` | Rejects `create` proposals for concepts and entities with names longer than three words, counting hyphens and underscores as separators. It also rejects entity `create` proposals with a type outside `entity_types`. OpenKB logs these drops as warnings. Set `false` to allow longer names and coerce unknown entity types to `other`. |
 | `briefs_budget_chars` | `120000` | Caps brief entries separately for concepts and entities in the planning prompt. Each list starts with the most-cited existing pages, then includes pending topics as space allows. The prompt discloses omissions. Set `0` to disable trimming. |
 
 In both update modes, a new topic stays in the pending buffer until the compiler

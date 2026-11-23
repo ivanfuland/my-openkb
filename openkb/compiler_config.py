@@ -6,28 +6,30 @@ import logging
 
 logger = logging.getLogger("openkb.config")
 
+DEFAULT_CONCEPT_UPDATE_MODE = "append"
+DEFAULT_STRICT_ITEM_MODE = True
 VALID_CONCEPT_UPDATE_MODES: tuple[str, ...] = ("rewrite", "append")
 
 
 def resolve_concept_update_mode(config: dict) -> str:
-    """Resolve ``concept_update_mode:`` — ``"rewrite"`` (default, full-page
-    LLM rewrite on update) or ``"append"`` (short note instead, see
-    ``openkb.agent.compiler_notes``). Invalid values degrade to ``"rewrite"``
-    with a warning.
+    """Resolve ``concept_update_mode:`` — ``"append"`` (default, short note,
+    see ``openkb.agent.compiler_notes``) or ``"rewrite"`` (full-page LLM
+    rewrite on update). Invalid values fall back to ``"append"`` with a warning.
     """
-    value = config.get("concept_update_mode", "rewrite")
+    value = config.get("concept_update_mode", DEFAULT_CONCEPT_UPDATE_MODE)
     if value not in VALID_CONCEPT_UPDATE_MODES:
         logger.warning(
-            "config: 'concept_update_mode' must be one of %s, got %r — using 'rewrite'.",
+            "config: 'concept_update_mode' must be one of %s, got %r — using %r.",
             VALID_CONCEPT_UPDATE_MODES,
             value,
+            DEFAULT_CONCEPT_UPDATE_MODE,
         )
-        return "rewrite"
+        return DEFAULT_CONCEPT_UPDATE_MODE
     return value
 
 
 def resolve_strict_item_mode(config: dict) -> bool:
-    """Resolve ``strict_item_mode:`` — ``False`` by default.
+    """Resolve ``strict_item_mode:`` — ``True`` by default.
 
     When ``True``, a brand-new concept/entity ``create`` item is dropped
     instead of kept whenever it looks like a bad/too-specific candidate:
@@ -39,16 +41,15 @@ def resolve_strict_item_mode(config: dict) -> bool:
       :func:`openkb.config.resolve_entity_types` vocabulary is dropped instead of being
       coerced to ``"other"`` — entities only, concepts have no ``type``.
 
-    All gates are opt-in together under this single flag. A non-bool value
-    degrades to ``False`` with a warning (matches
-    :func:`resolve_concept_update_mode`'s degrade-on-malformed-value
-    behavior).
+    Set ``False`` to disable both checks. A non-bool value falls back to
+    ``True`` with a warning.
     """
-    value = config.get("strict_item_mode", False)
+    value = config.get("strict_item_mode", DEFAULT_STRICT_ITEM_MODE)
     if not isinstance(value, bool):
         logger.warning(
-            "config: 'strict_item_mode' must be a bool, got %r — using False.",
+            "config: 'strict_item_mode' must be a bool, got %r — using %r.",
             value,
+            DEFAULT_STRICT_ITEM_MODE,
         )
-        return False
+        return DEFAULT_STRICT_ITEM_MODE
     return value
