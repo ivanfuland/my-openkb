@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from openkb import frontmatter
-from openkb.agent.compiler_notes import _NOTE_BULLET, _notes_section_bounds
+from openkb.agent.compiler_notes import _NOTE_BULLET, _notes_spans
 from openkb.lint import list_existing_wiki_targets, strip_ghost_wikilinks
 from openkb.locks import atomic_write_text
 from openkb.mutation import snapshot_paths
@@ -86,9 +86,9 @@ def _split_notes(body: str) -> tuple[str, str]:
     prose: list[str] = []
     notes: list[str] = []
     prose_from = 0
-    for start, end in _notes_section_bounds(lines):
+    for start, content_start, end in _notes_spans(lines):
         prose.extend(lines[prose_from:start])
-        notes.append("".join(lines[start + 1 : end]).strip())
+        notes.append("".join(lines[content_start:end]).strip())
         prose_from = end
     prose.extend(lines[prose_from:])
     return "".join(prose).strip(), "\n\n".join(filter(None, notes))

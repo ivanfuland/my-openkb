@@ -57,6 +57,26 @@ class TestSplitNotesAndCount:
         assert _split_notes(body) == (f"# Topic\n\n{examples}", note)
         assert count_pending_notes(body) == 1
 
+    @pytest.mark.parametrize("fence", ["````", "~~~~"])
+    def test_fenced_notes_example_stays_in_prose_and_is_not_counted(self, fence):
+        prose = (
+            f"# Topic\n\n{fence}markdown\n## Notes\n\n"
+            f"{fence[:-1]}\n- **2026-01-01** Literal example.\n"
+            f"Literal continuation. ([[summaries/a]])\n{fence}\n"
+        )
+        note = "- **2026-01-02** Real note. ([[summaries/a]])"
+        body = f"{prose}\n## Notes\n\n{note}"
+        assert count_pending_notes(body) == 1
+        assert _split_notes(body) == (prose.rstrip(), note)
+
+    def test_fence_inside_notes_stays_in_prose(self):
+        example = "```\n## Example\n- **Literal** ([[summaries/a]])\n```"
+        first = "- **2026-01-01** First. ([[summaries/a]])"
+        last = "- **2026-01-02** Last. ([[summaries/b]])"
+        body = f"# Topic\n\n## Notes\n\n{first}\n\n{example}\n\n{last}"
+        assert count_pending_notes(body) == 2
+        assert _split_notes(body) == (f"# Topic\n\n{example}", f"{first}\n\n{last}")
+
     def test_count_pending_notes_zero_without_heading(self):
         assert count_pending_notes("# Attention\n\nSome prose.") == 0
 

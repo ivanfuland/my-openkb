@@ -103,15 +103,27 @@ def test_recompile_short_dispatches_compile_short_doc(kb_dir):
     assert "recompiled 1" in result.output
 
 
-def test_recompile_replaces_both_note_formats_on_concept_and_entity_pages(kb_dir, monkeypatch):
+@pytest.mark.parametrize(
+    "example",
+    [
+        "",
+        "```markdown\n## Notes\n\n- **2026-01-04** Literal example.\n"
+        "Literal continuation.\n([[summaries/notes-h_s]])\n```\n\n",
+    ],
+    ids=["ordinary", "fenced-example"],
+)
+def test_recompile_replaces_both_note_formats_on_concept_and_entity_pages(
+    kb_dir, monkeypatch, example
+):
     _seed_short(kb_dir)
+    notes_prefix = f"# Topic\n\n{example}## Notes\n\n"
     topic_paths = []
     for page_dir in ("concepts", "entities"):
         topic = kb_dir / "wiki" / page_dir / "topic.md"
         topic.parent.mkdir(exist_ok=True)
         topic.write_text(
             '---\nsources: ["summaries/notes-h_s.md", "summaries/other.md"]\n---\n\n'
-            "# Topic\n\n## Notes\n\n"
+            f"{notes_prefix}"
             "- **2026-01-01** Legacy first line.\n\nLegacy continuation.\n"
             "([[summaries/notes-h_s]])\n"
             "- **2026-01-02** Old single line. ([[summaries/notes-h_s]])\n"
@@ -138,11 +150,13 @@ def test_recompile_replaces_both_note_formats_on_concept_and_entity_pages(kb_dir
     assert generate_note.await_count == 2
     for topic in topic_paths:
         text = topic.read_text(encoding="utf-8")
-        assert text.count("([[summaries/notes-h_s]])") == 1
-        assert "New first line. Second line. ([[summaries/notes-h_s]])\n" in text
-        assert "Legacy" not in text
-        assert "Old single line." not in text
-        assert text.endswith(
+        assert notes_prefix in text
+        notes = text.split(notes_prefix, 1)[1]
+        assert notes.count("([[summaries/notes-h_s]])") == 1
+        assert "New first line. Second line. ([[summaries/notes-h_s]])\n" in notes
+        assert "Legacy" not in notes
+        assert "Old single line." not in notes
+        assert notes.endswith(
             "- **2026-01-03** Sibling note. ([[summaries/other]])\n\n"
             "## Examples\n\nPreserve this section.\n"
         )

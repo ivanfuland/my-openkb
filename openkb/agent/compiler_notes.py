@@ -20,6 +20,7 @@ from pathlib import Path
 
 from openkb import frontmatter
 from openkb.locks import atomic_write_text
+from openkb.markdown import unfenced_line_ranges
 
 logger = logging.getLogger(__name__)
 
@@ -113,21 +114,21 @@ def note_fields(raw: str) -> tuple[str, str]:
     )
 
 
-def _notes_section_bounds(
-    lines: list[str], heading: str = _NOTES_HEADING
-) -> Iterator[tuple[int, int]]:
-    """Yield the heading index and exclusive end of each Notes section."""
-    start = None
-    for i, line in enumerate(lines):
-        if line.strip() == heading:
-            if start is not None:
-                yield start, i
-            start = i
-        elif start is not None and _ATX_HEADING.match(line.rstrip("\r\n")):
-            yield start, i
-            start = None
-    if start is not None:
-        yield start, len(lines)
+def _notes_spans(lines: list[str], heading: str = _NOTES_HEADING) -> Iterator[tuple[int, int, int]]:
+    """Yield (span start, content start, exclusive end) for unfenced Notes lines."""
+    in_notes = False
+    for start, end in unfenced_line_ranges(lines):
+        content_start = start
+        for i in range(start, end):
+            line = lines[i]
+            is_notes_heading = line.strip() == heading
+            if is_notes_heading or _ATX_HEADING.match(line.rstrip("\r\n")):
+                if in_notes and start < i:
+                    yield start, content_start, i
+                in_notes = is_notes_heading
+                start, content_start = i, i + 1
+        if in_notes:
+            yield start, content_start, end
 
 
 def remove_doc_notes(body: str, doc_name: str, heading: str = _NOTES_HEADING) -> str:
@@ -135,9 +136,9 @@ def remove_doc_notes(body: str, doc_name: str, heading: str = _NOTES_HEADING) ->
     lines = body.splitlines(keepends=True)
     kept: list[str] = []
     kept_from = 0
-    for start, end in _notes_section_bounds(lines, heading):
+    for _, start, end in _notes_spans(lines, heading):
         note_start = None
-        for i in range(start + 1, end):
+        for i in range(start, end):
             line = lines[i]
             if line.lstrip().startswith(_NOTE_BULLET):
                 note_start = i
@@ -165,8 +166,8 @@ def _upsert_note_line(
     line = f"- **{date}** {note} ({marker})"
 
     lines = remove_doc_notes(body, doc_name, heading).split("\n")
-    section = next(_notes_section_bounds(lines, heading), None)
-    if section is None:
+    first_span = next(_notes_spans(lines, heading), None)
+    if first_span is None:
         while lines and lines[-1].strip() == "":
             lines.pop()
         if lines:
@@ -175,7 +176,7 @@ def _upsert_note_line(
         lines.append("")
         lines.append(line)
     else:
-        insert_at = section[0] + 1
+        _, insert_at, _ = first_span
         if insert_at < len(lines) and lines[insert_at].strip() == "":
             insert_at += 1
         lines.insert(insert_at, line)

@@ -18,6 +18,7 @@ import yaml
 
 from openkb import frontmatter
 from openkb.locks import atomic_write_text
+from openkb.markdown import unfenced_line_ranges
 from openkb.schema import PAGE_CONTENT_DIRS
 
 # Matches [[wikilink]] or [[subdir/link]]
@@ -68,7 +69,7 @@ def strip_ghost_wikilinks(
 ) -> tuple[str, list[str]]:
     """Strip [[wikilinks]] whose targets do not exist in ``known_targets``.
 
-    For each ``[[X]]`` or ``[[X|alias]]`` in ``content``:
+    For each ``[[X]]`` or ``[[X|alias]]`` outside fenced code blocks:
 
     - If ``X`` is in ``known_targets`` after trimming surrounding whitespace
       and slashes, the link is kept as-is.
@@ -91,6 +92,8 @@ def strip_ghost_wikilinks(
         ``ghost_targets`` is the list of unresolved targets that were
         stripped (one entry per occurrence, in document order).
     """
+    if "[[" not in content:
+        return content, []
     if norm_index is None:
         norm_index = build_norm_index(known_targets)
 
@@ -125,8 +128,15 @@ def strip_ghost_wikilinks(
         stem = target.rsplit("/", 1)[-1]
         return stem.replace("-", " ").replace("_", " ")
 
-    cleaned = _WIKILINK_RE.sub(_repl, content)
-    return cleaned, ghosts
+    lines = content.splitlines(keepends=True)
+    parts: list[str] = []
+    previous_end = 0
+    for start, end in unfenced_line_ranges(lines):
+        parts.extend(lines[previous_end:start])
+        parts.append(_WIKILINK_RE.sub(_repl, "".join(lines[start:end])))
+        previous_end = end
+    parts.extend(lines[previous_end:])
+    return "".join(parts), ghosts
 
 
 def _read_md(path: Path) -> str:
