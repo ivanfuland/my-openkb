@@ -1,15 +1,6 @@
-"""Consolidate a concept/entity page's accumulated "## Notes" into prose.
+"""Consolidation backend for the ``openkb consolidate`` command.
 
-Companion to ``openkb.agent.compiler_notes`` (``concept_update_mode="append"``):
-once a page has accumulated one or more notes, ``openkb consolidate`` folds
-them into the page's existing prose with a single LLM call — no new source
-document, no concept/entity classification step, since the page is already
-fixed. Contradictions between notes (or between notes and existing prose) are
-described directly in the rewritten text rather than silently resolved. The
-"## Notes" section is replaced entirely: after consolidation the page reads
-like an ordinary ``concept_update_mode="rewrite"`` page — new notes appended
-later (see ``compiler_notes``) start a fresh "## Notes" section, so the next
-consolidation run only ever sees what changed since the last one.
+See the command's help for the user-facing rewrite and selection behavior.
 """
 
 from __future__ import annotations

@@ -152,15 +152,14 @@ Short documents are read in full by the LLM. Long PDFs are processed by [PageInd
 
 ### Knowledge Compilation
 
-When you add a document, the LLM:
+When you add a document, OpenKB:
 
-1. Generates a **summary** page
-2. Reads existing **concept** and **entity** pages
-3. Creates or updates concepts with cross-document synthesis
-4. Creates or updates **entity** pages (people, orgs, places, products)
-5. Updates the **index** and **log**
+1. Generates a **summary** page.
+2. Uses concept and entity briefs to plan which topics to track, update, or link.
+3. Buffers notes for new topics and updates existing pages using the configured mode.
+4. Updates the **index** and **log**.
 
-A single source might touch 10--15 wiki pages. Knowledge accumulates: each document enriches the existing wiki rather than sitting in isolation.
+See [compilation settings](#compilation-settings) for how topics become wiki pages.
 
 # ⚙️ Usage
 
@@ -184,7 +183,8 @@ OpenKB commands fall into two layers: the **wiki foundation** (compile + manage 
 | Command                                                            | Description                                                                                                                                                                                                                          |
 | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | <code>openkb&nbsp;remove&nbsp;&lt;doc&gt;</code>                   | Remove a document and clean up its wiki pages, images, registry, and PageIndex state (`--dry-run` to preview, `--keep-raw` / `--keep-empty` to retain artifacts)                                                                     |
-| <code>openkb&nbsp;recompile&nbsp;[&lt;doc&gt;]&nbsp;[--all]</code> | Re-run the compile pipeline on already-indexed docs without re-indexing. Regenerates summaries and rewrites concept pages; manual edits are overwritten (`--dry-run` to preview, `--refresh-schema` to also update `wiki/AGENTS.md`) |
+| <code>openkb&nbsp;recompile&nbsp;[&lt;doc&gt;]&nbsp;[--all]</code> | Re-run compilation without re-indexing. Can overwrite manual edits. Preview with `--dry-run` (`openkb recompile --help` for details). |
+| <code>openkb&nbsp;consolidate&nbsp;&lt;page&gt;</code> or `openkb consolidate --all` | Fold accumulated notes into prose by rewriting each selected page body. Preview with `--dry-run` (`openkb consolidate --help` for details). |
 | <code>openkb&nbsp;feedback&nbsp;["msg"]</code>                     | File feedback by opening a prefilled GitHub issue (`--type bug/feature/question` to tag it)                                                                                                                                          |
 
 </details>
@@ -257,17 +257,22 @@ language: en                     # Wiki output language
 pageindex_threshold: 20          # PDF pages threshold for PageIndex
 ```
 
-The full settings reference — `entity_types`, OAuth providers (`chatgpt/*`, `github_copilot/*`), and LiteLLM tuning (timeouts for slow local runtimes like Ollama / LM Studio, `drop_params`, GitHub Copilot headers, install notes) — is in **[`examples/configuration/`](examples/configuration/)**.
+For other settings, including `entity_types`, OAuth providers (`chatgpt/*`, `github_copilot/*`), and LiteLLM tuning, see the [configuration reference](examples/configuration/).
 
 ### Compilation settings
 
+Set these options in the knowledge base's `.openkb/config.yaml`.
+
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `concept_update_mode` | `rewrite` | `rewrite` sends the full existing page to the LLM to incorporate the new document. `append` generates a short note for the new document and records it under `## Notes`. Run `openkb consolidate <page>` or `openkb consolidate --all` to fold accumulated notes into prose. |
-| `strict_item_mode` | `false` | When enabled, drops proposed new concept or entity names longer than three words. It also drops proposed new entities whose types fall outside `entity_types`. OpenKB logs these drops as warnings. |
-| `briefs_budget_chars` | `120000` | Character budget for brief entries in each planning list (concepts and entities). The list shows existing pages in source-count order, followed by pending topics as space allows. The prompt discloses omissions. Set `0` to disable trimming. |
+| `concept_update_mode` | `rewrite` | Applies to concepts and entities. `rewrite` sends the existing page to the LLM to incorporate new material. `append` adds a dated, source-linked entry under `## Notes` without sending the existing body to the LLM. New pages in append mode start with their buffered notes. See `openkb consolidate --help` to fold notes into prose. |
+| `strict_item_mode` | `false` | Rejects `create` proposals for concepts and entities with names longer than three words, counting hyphens and underscores as separators. It also rejects entity `create` proposals with a type outside `entity_types`. OpenKB logs these drops as warnings. |
+| `briefs_budget_chars` | `120000` | Caps brief entries separately for concepts and entities in the planning prompt. Each list starts with the most-cited existing pages, then includes pending topics as space allows. The prompt discloses omissions. Set `0` to disable trimming. |
 
-New concepts and entities collect pending notes until their third mention, when OpenKB promotes them to wiki pages.
+In both update modes, a new topic stays in the pending buffer until the compiler
+has collected notes about it from three distinct documents. Recompiling the
+same document replaces its buffered note. Pending topics can inform planning
+before they have pages in the wiki.
 
 ### PageIndex Setup
 

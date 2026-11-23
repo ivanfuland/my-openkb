@@ -255,10 +255,8 @@ def resolve_timeout(config: dict) -> float | None:
 
 
 def resolve_concurrency(config: dict) -> int | None:
-    """Resolve the optional ``concurrency:`` key — the cap on concurrent LLM
-    calls OpenKB makes during ingest (PageIndex indexing and concept/entity
-    compilation alike; they never run at the same time for one document, so
-    one setting covers both).
+    """Resolve the optional ``concurrency:`` cap for LLM calls during
+    PageIndex indexing, concept/entity compilation, and consolidation.
 
     Returns ``None`` when absent, explicitly ``null``, or invalid (rejecting
     bools and non-positive values with a warning when present but unusable —

@@ -3,9 +3,10 @@
 Pipeline leveraging LLM prompt caching:
   Step 1: Build base context A (schema + document content).
   Step 2: A → generate summary.
-  Step 3: A + summary → concepts plan (create/update/related).
-  Step 4: Concurrent LLM calls (A cached) → generate new + rewrite updated concepts.
-  Step 5: Code adds cross-ref links to related concepts, updates index.
+  Step 3: A + summary + briefs → concept/entity plan (create/update/related).
+  Step 4: Concurrent LLM calls (A cached) → buffer or promote new topics and
+          update existing pages.
+  Step 5: Code adds cross-references and updates the index.
 
 Anthropic prompt caching is enabled via ``cache_control`` markers at two
 breakpoints: end of the document message (caches system + doc across all
@@ -1005,12 +1006,8 @@ def _read_concept_briefs(
     truncating the first 150 chars of the body (newlines collapsed to spaces).
     Formats each as ``- {slug}: {description}``.
 
-    With ``budget_chars`` > 0 the list is capped at that many characters, most-
-    cited concepts first (see :func:`_fit_briefs`). The cap exists because this
-    list grows with the KB and lands in the plan prompt on every compiled
-    document: an unbounded list eventually exceeds the model's context window,
-    and the failure arrives as a hard error mid-compile rather than as degraded
-    output.
+    A positive ``budget_chars`` limits brief entries via :func:`_fit_briefs`,
+    which adds a separate marker when it omits entries.
 
     Returns "(none yet)" if there are no existing or pending briefs.
     """
@@ -1908,8 +1905,9 @@ async def _compile_concepts(
     default ``"rewrite"`` sends the full page back to the LLM for a rewrite;
     ``"append"`` generates a short note instead (the LLM never sees the
     existing page) and appends it via ``openkb.agent.compiler_notes`` — no
-    LLM call for the write itself. New pages are generated the same way in
-    both modes for "rewrite" (full content) vs. a note for "append".
+    LLM call for the write itself. On promotion, ``rewrite`` uses the prior
+    notes as context for page generation, while ``append`` writes them as
+    the initial notes on the page.
     """
     source_file = f"summaries/{doc_name}.md"
 
@@ -2103,11 +2101,9 @@ async def _compile_concepts(
     )
     entity_create = []
 
-    # Only candidates whose buffer ALREADY holds MAX_NOTES_BEFORE_PROMOTION
-    # notes will promote to a real page this round (this document's mention
-    # is their 3rd) — those need to be in the wikilink whitelist below; a
-    # still-buffering candidate (1st/2nd mention) must NOT be, since no page
-    # will exist for it yet.
+    # Include candidates with enough notes from other documents to promote
+    # in this round's wikilink whitelist. A refreshed note for the current
+    # document cannot count twice toward promotion.
     def _will_promote(kind: str, item: dict) -> bool:
         slug = _sanitize_concept_name(item["name"])
         count = pending_store.note_count(kind, slug, excluding_doc=doc_name)
@@ -2452,13 +2448,11 @@ async def _compile_concepts(
         return name, note, "", etype
 
     async def _gen_pending_concept(concept: dict) -> tuple[str, str] | None:
-        """Buffer a note for a concept with no real page yet, or promote it
-        to a real page on its 3rd mention (see openkb.pending). Returns
-        ``None`` for a buffer-only step (nothing written); returns
-        ``(safe_name, brief)`` for a promotion — the page is already written
-        directly (with all buffered sources) by this function, so the caller
-        only needs the slug/brief to register it for backlinking/index
-        update, same as a normal create.
+        """Buffer a concept note or promote the topic (see ``openkb.pending``).
+
+        Return ``None`` if the topic is still buffered. For a promotion, the
+        page is already written with all buffered sources, so the caller only
+        needs ``(safe_name, brief)`` for backlinks and index updates.
         """
         name = concept["name"]
         title = concept.get("title", name)

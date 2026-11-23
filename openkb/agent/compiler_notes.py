@@ -5,9 +5,8 @@ entity page's full body back to the LLM for a rewrite (``_gen_update``/
 ``_gen_entity_update`` in ``compiler.py``), this module generates a short note
 about the new document — the LLM never sees the existing page — and appends
 it deterministically (no LLM call for the write itself) as a dated,
-source-linked line under a ``## Notes`` heading in the same page. Reconciling
-the accumulated notes back into curated prose is a separate, future concern —
-out of scope here.
+source-linked entry under a ``## Notes`` heading in the same page. See
+``openkb.agent.consolidator`` for the separate prose rewrite.
 """
 
 from __future__ import annotations

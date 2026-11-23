@@ -1894,8 +1894,10 @@ def recompile(ctx, doc_name, all_docs, dry_run, yes, refresh_schema):
     slug, or unique substring). ``--all`` recompiles every indexed doc.
     Exactly one of DOC_NAME or ``--all`` is required.
 
-    Side effect: this regenerates summaries (short docs) and rewrites concept
-    pages with the current logic — manual edits to those pages are overwritten.
+    Recompiling regenerates short-document summaries. Existing concept and
+    entity pages follow ``concept_update_mode``. In ``rewrite`` mode the LLM
+    rewrites the page body and can overwrite manual edits. In ``append`` mode
+    OpenKB records source-linked notes for these updates.
     """
     from openkb.state import HashRegistry
 
@@ -2081,26 +2083,20 @@ def recompile(ctx, doc_name, all_docs, dry_run, yes, refresh_schema):
 def consolidate(ctx, page_name, all_pages, min_notes, dry_run, yes):
     """Fold a concept/entity page's accumulated "## Notes" into curated prose.
 
-    Only relevant under ``concept_update_mode: append`` (see ``openkb add``):
-    each ingested document appends a short dated note to the concept/entity
-    pages it touches instead of rewriting them in full. This command folds
-    those notes into the page's prose with a single LLM call per page — no
-    new source document, no concept/entity classification, since the page is
-    already fixed. Contradictions between notes (or between notes and
-    existing prose) are described directly in the rewritten text rather than
-    silently resolved.
+    Use this for pages with ``## Notes`` from ``concept_update_mode: append``.
+    Consolidation uses one LLM call per page. The prompt asks the LLM to
+    describe discrepancies between sources in the new prose.
 
-    PAGE_NAME resolves like ``openkb remove`` — exact slug first, else a
-    unique substring match across ``wiki/concepts/`` and ``wiki/entities/``.
-    ``--all`` consolidates every page with at least ``--min-notes`` pending
-    notes. Exactly one of PAGE_NAME or ``--all`` is required. With ``--all``,
-    pages are consolidated concurrently (bounded by the ``concurrency:``
-    config key, same as concept/entity generation during ingest).
+    Specify exactly one of PAGE_NAME or ``--all``. PAGE_NAME matches an exact
+    concept or entity slug first, then a unique substring. ``--all`` selects
+    pages with at least ``--min-notes`` notes and processes them concurrently
+    using the KB's ``concurrency`` setting. Preview the selection with
+    ``--dry-run``. ``--all`` prompts for confirmation when multiple pages are
+    selected, unless you pass ``--yes``.
 
-    Side effect: this replaces the page's "## Notes" section with prose —
-    manual edits inside that section are overwritten. Existing prose above
-    it, ``sources:``, and ``type:`` are preserved; only ``description:`` may
-    be refreshed.
+    Consolidation replaces the entire Markdown body, including existing prose
+    and manual edits. It preserves frontmatter, except that it can refresh
+    ``description:``.
     """
     from openkb.agent import consolidator
 

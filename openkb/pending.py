@@ -1,14 +1,8 @@
 """Pending-topic buffer for the wiki compiler (see issue #247).
 
-Buffers up to :data:`MAX_NOTES_BEFORE_PROMOTION` short notes per brand-new
-concept/entity candidate before a dedicated wiki page is created, so a topic
-mentioned exactly once or twice (a document's own ticket/case identifier, a
-person mentioned only in passing) doesn't immediately get its own low-value
-page — while a topic that genuinely recurs still gets promoted to a real
-page, with all buffered notes as its starting content/sources. Used by
-``openkb.agent.compiler``; kept as its own module so the JSON-backed
-persistence mirrors ``openkb.state.HashRegistry``'s load-on-init /
-persist-on-mutation pattern without growing that module further.
+The compiler uses this store to defer page creation for one-off topics.
+Persistence follows ``openkb.state.HashRegistry``'s load-on-init and
+persist-on-mutation pattern.
 """
 
 from __future__ import annotations
@@ -19,9 +13,8 @@ from pathlib import Path
 
 from openkb.locks import atomic_write_json
 
-#: Number of notes collected before the NEXT note promotes the topic to a
-#: real page (i.e. the 3rd mention creates the page). Intentionally not a
-#: config key (see issue #247) — internal, hardcoded constant.
+#: Number of distinct documents required in the buffer before a note from
+#: another document triggers promotion. Intentionally fixed (see issue #247).
 MAX_NOTES_BEFORE_PROMOTION = 2
 
 
@@ -103,7 +96,12 @@ class PendingTopicsStore:
         return len(notes)
 
     def remove(self, kind: str, slug: str) -> None:
-        """Remove a pending entry (called right after promotion to a real page)."""
+        """Remove a pending entry after the promoted page is fully written.
+
+        Keeping the notes until then preserves the source material if a write
+        or page-generation call fails. See ``test_promotion_failure_preserves_buffer``
+        in ``tests/test_compiler.py``.
+        """
         if slug in self._data[kind]:
             del self._data[kind][slug]
             self._persist()
@@ -111,18 +109,10 @@ class PendingTopicsStore:
     def brief_lines(self, kind: str) -> list[str]:
         """Return ``- {slug} (pending, {n}/{total} mentions) — {description}`` lines.
 
-        Extends the plan call's existing-page briefs so the LLM treats
-        pending topics like quasi-existing pages for dedup ("prefer update"/
-        "related" over proposing a near-duplicate create). Pending slugs
-        must NEVER be added to the wikilink whitelist (no real page exists
-        yet) — enforcing that is the caller's responsibility, not this
-        method's.
-
-        ``entry["description"]`` is read directly (no fallback): every entry
-        is guaranteed to have one, either from ``add_note`` or from the
-        one-time migration of legacy entries that predate this field (see
-        issue #247 follow-up) — a missing field is a genuine data bug, so it
-        raises a plain ``KeyError`` rather than degrading silently.
+        Pending briefs help the planner recognize topics it has already seen.
+        The caller decides which topics are ready to become wikilink targets.
+        A missing ``description`` indicates a malformed entry and raises
+        ``KeyError``.
         """
         total = MAX_NOTES_BEFORE_PROMOTION + 1
         lines: list[str] = []
