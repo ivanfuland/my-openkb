@@ -18,7 +18,7 @@ import yaml
 
 from openkb import frontmatter
 from openkb.locks import atomic_write_text
-from openkb.markdown import unfenced_line_ranges
+from openkb.markdown import non_code_line_ranges
 from openkb.schema import PAGE_CONTENT_DIRS
 
 # Matches [[wikilink]] or [[subdir/link]]
@@ -69,7 +69,7 @@ def strip_ghost_wikilinks(
 ) -> tuple[str, list[str]]:
     """Strip [[wikilinks]] whose targets do not exist in ``known_targets``.
 
-    For each ``[[X]]`` or ``[[X|alias]]`` outside fenced code blocks:
+    For each ``[[X]]`` or ``[[X|alias]]`` outside fenced and indented code blocks:
 
     - If ``X`` is in ``known_targets`` after trimming surrounding whitespace
       and slashes, the link is kept as-is.
@@ -131,7 +131,7 @@ def strip_ghost_wikilinks(
     lines = content.splitlines(keepends=True)
     parts: list[str] = []
     previous_end = 0
-    for start, end in unfenced_line_ranges(lines):
+    for start, end in non_code_line_ranges(lines):
         parts.extend(lines[previous_end:start])
         parts.append(_WIKILINK_RE.sub(_repl, "".join(lines[start:end])))
         previous_end = end

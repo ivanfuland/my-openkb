@@ -109,8 +109,10 @@ def test_recompile_short_dispatches_compile_short_doc(kb_dir):
         "",
         "```markdown\n## Notes\n\n- **2026-01-04** Literal example.\n"
         "Literal continuation.\n([[summaries/notes-h_s]])\n```\n\n",
+        "    ## Notes\n\n    - **2026-01-04** Literal example.\n"
+        "    Literal continuation.\n    ([[summaries/notes-h_s]])\n\n",
     ],
-    ids=["ordinary", "fenced-example"],
+    ids=["ordinary", "fenced-example", "indented-example"],
 )
 def test_recompile_replaces_both_note_formats_on_concept_and_entity_pages(
     kb_dir, monkeypatch, example

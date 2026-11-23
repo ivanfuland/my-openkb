@@ -20,7 +20,7 @@ from pathlib import Path
 
 from openkb import frontmatter
 from openkb.locks import atomic_write_text
-from openkb.markdown import closing_fence_for_append, unfenced_line_ranges
+from openkb.markdown import closing_fence_for_append, non_code_line_ranges
 
 logger = logging.getLogger(__name__)
 
@@ -115,9 +115,9 @@ def note_fields(raw: str) -> tuple[str, str]:
 
 
 def _notes_spans(lines: list[str], heading: str = _NOTES_HEADING) -> Iterator[tuple[int, int, int]]:
-    """Yield (span start, content start, exclusive end) for unfenced Notes lines."""
+    """Yield (span start, content start, exclusive end) for Notes lines outside code."""
     in_notes = False
-    for start, end in unfenced_line_ranges(lines):
+    for start, end in non_code_line_ranges(lines):
         content_start = start
         for i in range(start, end):
             line = lines[i]

@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from openkb.agent.compiler import (
@@ -548,13 +549,19 @@ def test_cli_remove_rolls_back_pages_that_reference_doc_only_in_body(kb_dir):
     assert hashes.read_bytes() == original_hashes
 
 
-def test_cli_remove_preserves_fenced_notes_examples(kb_dir):
+@pytest.mark.parametrize(
+    "example",
+    [
+        "```markdown\n## Notes\n\n- **2026-01-01** Literal example.\n"
+        "Literal continuation.\n([[summaries/attention-h_a]])\n```\n\n",
+        "    ## Notes\n\n    - **2026-01-01** Literal example.\n"
+        "    Literal continuation.\n    ([[summaries/attention-h_a]])\n\n",
+    ],
+    ids=["fenced-example", "indented-example"],
+)
+def test_cli_remove_preserves_notes_examples(kb_dir, example):
     _seed_two_doc_kb(kb_dir)
     wiki = kb_dir / "wiki"
-    example = (
-        "```markdown\n## Notes\n\n- **2026-01-01** Literal example.\n"
-        "Literal continuation.\n([[summaries/attention-h_a]])\n```\n\n"
-    )
     body_prefix = f"# Topic\n\n{example}## Notes\n\n"
     inline_example = "~~~markdown\n- **Example** ([[summaries/attention-h_a]])\n~~~\n\n"
     kept_note = "- **2026-01-03** Sibling note. ([[summaries/llm-h_l]])\n"
