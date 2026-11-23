@@ -157,10 +157,9 @@ def _setup_llm_key(kb_dir: Path | None = None, *, model_override: str | None = N
 
     Also propagates to provider-specific env vars (OPENAI_API_KEY, etc.)
     so that the Agents SDK litellm provider can pick them up.
-    Provider is auto-detected from the KB config when available; otherwise
-    a common provider set is used as a fallback. ``model_override`` forces the
-    provider detection to a different model than the config's ``model`` (used
-    by ``openkb consolidate`` for ``consolidate_model``).
+    When a KB is supplied, pass ``model_override`` if the command selects its
+    own model so credential setup follows the provider the command will use.
+    Without a KB, key checks use a common provider set.
     """
     if kb_dir is not None:
         env_file = kb_dir / ".env"
@@ -184,12 +183,10 @@ def _setup_llm_key(kb_dir: Path | None = None, *, model_override: str | None = N
     parallel_tool_calls_explicit = False
     litellm_settings: dict = {}
     if kb_dir is not None:
-        # Resolve model the same way the command bodies do (DEFAULT -> global.yaml
-        # -> KB config.yaml) so provider extraction sees the effective, global-
-        # layered model. Reading KB config.yaml alone would miss a global-only
-        # default model (or fall back to DEFAULT_CONFIG's model) and derive the
-        # wrong provider. resolve_effective_config handles a missing config.yaml
-        # internally, so no config_path.exists() gate is needed.
+        # Resolve layered KB settings even when the caller supplies the model.
+        # Without an override, reading KB config.yaml alone would miss a
+        # global-only model and could select the wrong provider. The effective
+        # config also handles a missing config.yaml.
         config = resolve_effective_config(kb_dir)[0]
         model = (
             model_override

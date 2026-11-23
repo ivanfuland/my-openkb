@@ -15,7 +15,7 @@ project: "my-openkb"
 
 Allow each OpenKB knowledge base to optionally specify `consolidate_model` in `.openkb/config.yaml` so everyday `openkb add` (fast `append` mode) and periodic `openkb consolidate` (full-page prose synthesis) can use different models.
 
-When `consolidate_model` is omitted or `null`, `openkb consolidate` continues to use `model` (with the existing `DEFAULT_CONFIG["model"]` fallback) with zero behavior change.
+See the [compilation settings reference](../../README.md#compilation-settings) for the user-facing configuration behavior.
 
 ## Scope
 
