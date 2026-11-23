@@ -2599,11 +2599,20 @@ class TestBriefIntegration:
             }
         )
 
+        _seed_pending(tmp_path, "concepts", "transformer", "Transformer")
+        note_resp = json.dumps({"description": "NN architecture", "note": "Uses self-attention."})
         with patch("openkb.agent.compiler.litellm") as mock_litellm:
             mock_litellm.completion = MagicMock(
                 side_effect=_mock_completion([summary_resp, plan_resp])
             )
-            mock_litellm.acompletion = AsyncMock(side_effect=_mock_acompletion([concept_resp]))
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=_routed_acompletion(
+                    [
+                        ("NEW concept page", note_resp),
+                        ("Write the concept page for", concept_resp),
+                    ]
+                )
+            )
             await compile_short_doc("test-doc", source_path, tmp_path, "gpt-4o-mini")
 
         # Summary frontmatter has doc_type and full_text
