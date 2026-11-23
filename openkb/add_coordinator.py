@@ -10,6 +10,7 @@ import click
 
 from openkb.locks import kb_ingest_lock_held
 from openkb.mutation import MutationSnapshot, snapshot_paths
+from openkb.pending import PendingTopicsStore, pending_topics_path
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,15 @@ def _failure_target(details: dict) -> str:
     return ""
 
 
+def _pending_promotion_paths(kb_dir: Path) -> list[Path]:
+    # Promotion can edit earlier summaries as well as the current document.
+    # Snapshot an absent store too so rollback removes any newly buffered notes.
+    pending_path = pending_topics_path(kb_dir)
+    summaries = kb_dir / "wiki" / "summaries"
+    store = PendingTopicsStore(pending_path)
+    return [pending_path, *(summaries / f"{name}.md" for name in sorted(store.document_names()))]
+
+
 def run_add_mutation(kb_dir: Path, plan: AddMutationPlan) -> bool:
     if not kb_ingest_lock_held(kb_dir / ".openkb"):
         raise RuntimeError("run_add_mutation requires the caller to hold kb_ingest_lock")
@@ -95,7 +105,7 @@ def run_add_mutation(kb_dir: Path, plan: AddMutationPlan) -> bool:
     try:
         snapshot = snapshot_paths(
             kb_dir,
-            list(plan.touched_paths),
+            [*plan.touched_paths, *_pending_promotion_paths(kb_dir)],
             operation=plan.operation,
             details=plan.details,
             hardlink_dirs=plan.hardlink_dirs,

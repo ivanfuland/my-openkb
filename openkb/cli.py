@@ -76,9 +76,16 @@ from openkb.indexer import (
     _write_long_doc_artifacts,
     prepare_cloud_import,
 )
-from openkb.locks import atomic_write_json, atomic_write_text, kb_ingest_lock, kb_read_lock
+from openkb.locks import (
+    atomic_write_bytes,
+    atomic_write_json,
+    atomic_write_text,
+    kb_ingest_lock,
+    kb_read_lock,
+)
+from openkb.mutation import MutationSnapshot, publish_staged_tree, snapshot_paths
+from openkb.pending import PendingTopicsStore, pending_topics_path
 from openkb.log import append_log
-from openkb.mutation import publish_staged_tree
 from openkb.schema import AGENTS_MD, INDEX_SEED, PAGE_CONTENT_DIRS
 
 # Suppress warnings after all imports — markitdown overrides filters at import time
@@ -433,14 +440,34 @@ def _snapshot_add_paths(
     return paths
 
 
-def _run_compile_with_retry(coro_factory, label: str) -> None:
+def _run_compile_with_retry(
+    coro_factory, label: str, snapshot: MutationSnapshot, *, indexed_summary: Path | None = None
+) -> None:
     click.echo(f"  {label}...")
+    initial_summary = (
+        indexed_summary.read_bytes()
+        if indexed_summary is not None and indexed_summary.exists()
+        else None
+    )
+    wiki = snapshot.kb_dir / "wiki"
+    compile_paths = [
+        path
+        for path in snapshot.entries
+        if path == pending_topics_path(snapshot.kb_dir)
+        or path in {wiki / "concepts", wiki / "entities", wiki / "index.md"}
+        or path.parent == wiki / "summaries"
+    ]
     for attempt in range(2):
         try:
             asyncio.run(coro_factory())
             return
         except Exception as exc:
             if attempt == 0:
+                # Keep staged conversion/indexer inputs in place, but undo
+                # any partial compilation before asking the model again.
+                snapshot.restore(compile_paths)
+                if indexed_summary is not None and initial_summary is not None:
+                    atomic_write_bytes(indexed_summary, initial_summary)
                 click.echo("  Retrying compilation in 2s...")
                 time.sleep(2)
             else:
@@ -567,6 +594,8 @@ def _add_single_file_locked(
                     bundle=bundle,
                 ),
                 label=f"Compiling long doc (doc_id={index_result.doc_id})",
+                snapshot=snapshot,
+                indexed_summary=summary_path,
             )
         else:
             if result.source_path is None:
@@ -582,6 +611,7 @@ def _add_single_file_locked(
                     bundle=bundle,
                 ),
                 label="Compiling short doc",
+                snapshot=snapshot,
             )
 
         # Register hash only after successful compilation.
@@ -755,7 +785,7 @@ def import_from_pageindex_cloud(doc_id: str, kb_dir: Path) -> Literal["added", "
             stem = _cloud_display_stem(cloud.cloud_name, doc_id)
             doc_name = resolve_doc_name_from_key(stem, path_key, registry)
 
-            def commit_body(_snapshot) -> None:
+            def commit_body(snapshot: MutationSnapshot) -> None:
                 summary_path = _write_long_doc_artifacts(
                     cloud.tree,
                     cloud.all_pages,
@@ -775,6 +805,8 @@ def import_from_pageindex_cloud(doc_id: str, kb_dir: Path) -> Literal["added", "
                         max_concurrency=resolve_concurrency(config) or DEFAULT_COMPILE_CONCURRENCY,
                     ),
                     label=f"Compiling imported doc (doc_id={doc_id})",
+                    snapshot=snapshot,
+                    indexed_summary=summary_path,
                 )
 
                 # Register the raw-less cloud entry only after successful compilation.
@@ -1091,6 +1123,11 @@ def add(ctx, path, from_pageindex_cloud):
     Alternatively, pass --from-pageindex-cloud <DOC_ID> to import a document
     that is already indexed in PageIndex Cloud, with no local file. Requires
     the PAGEINDEX_API_KEY environment variable.
+
+    When a buffered topic becomes a page, OpenKB adds links to it from
+    the contributing document summaries, including earlier ones. If the
+    model truncates a short document's summary rewrite, OpenKB uses the
+    initial summary.
     """
     kb_dir = _find_kb_dir(ctx.obj.get("kb_dir_override"))
     if kb_dir is None:
@@ -1372,6 +1409,7 @@ class RemovePlan:
     actions: list[RemoveAction]
     concept_deletes: list[str]
     entity_deletes: list[str]
+    pending_note_count: int
     raw_path: Path | None
     cleanup_pageindex: bool
     pageindex_doc_id: str | None
@@ -1402,6 +1440,14 @@ class RemoveResult:
     message: str
 
 
+def _load_pending_topics_for_remove(path: Path) -> PendingTopicsStore | None:
+    try:
+        return PendingTopicsStore(path)
+    except (ValueError, OSError) as exc:
+        logging.getLogger(__name__).warning("Skipping pending note cleanup for %s: %s", path, exc)
+        return None
+
+
 def _build_remove_plan(
     kb_dir: Path,
     file_hash: str,
@@ -1410,10 +1456,9 @@ def _build_remove_plan(
     keep_raw: bool,
     keep_empty: bool,
 ) -> RemovePlan:
-    """Scan the KB and predict every file remove will touch (no writes).
+    """Preview removal without writing to the KB.
 
-    Only frontmatter ``sources:`` membership drives the delete/edit
-    classification so the plan reflects what the executor will actually do.
+    Topic-page actions are classified by frontmatter ``sources:`` membership.
     """
     from openkb.agent.compiler import scan_affected_pages
 
@@ -1466,6 +1511,17 @@ def _build_remove_plan(
             RemoveAction("MODIFY", f"wiki/entities/{slug}.md  (drop this doc from sources)")
         )
 
+    pending_path = pending_topics_path(kb_dir)
+    pending = _load_pending_topics_for_remove(pending_path)
+    pending_note_count = pending.count_document_notes(doc_name) if pending is not None else 0
+    if pending_note_count:
+        actions.append(
+            RemoveAction(
+                "MODIFY",
+                f"{pending_path.relative_to(kb_dir)}  (purge {pending_note_count} note(s))",
+            )
+        )
+
     if (wiki_dir / "index.md").exists():
         actions.append(RemoveAction("MODIFY", "wiki/index.md  (remove Documents entry)"))
 
@@ -1509,6 +1565,7 @@ def _build_remove_plan(
         actions=actions,
         concept_deletes=concept_deletes,
         entity_deletes=entity_deletes,
+        pending_note_count=pending_note_count,
         raw_path=raw_path,
         cleanup_pageindex=cleanup_pageindex,
         pageindex_doc_id=pageindex_doc_id,
@@ -1520,20 +1577,68 @@ def _build_remove_plan(
 
 
 def _execute_remove_plan(
+    kb_dir: Path, plan: RemovePlan, registry, *, keep_empty: bool
+) -> RemoveResult:
+    """Journal local wiki and registry changes, including pending notes."""
+    from openkb.agent.compiler import iter_topic_pages_referencing_doc
+
+    wiki = kb_dir / "wiki"
+    paths = [
+        plan.summary_path,
+        plan.source_md,
+        plan.source_json,
+        plan.images_dir,
+        wiki / "index.md",
+        wiki / "log.md",
+        kb_dir / ".openkb" / "hashes.json",
+    ]
+    # Use the same scan as the mutator so rollback covers body-only mentions
+    # that the frontmatter-based preview omits.
+    for page_dir in ("concepts", "entities"):
+        paths.extend(
+            path for path, _ in iter_topic_pages_referencing_doc(wiki / page_dir, plan.doc_name)
+        )
+    if plan.raw_path is not None:
+        paths.append(plan.raw_path)
+    pending_path = pending_topics_path(kb_dir)
+    pending = _load_pending_topics_for_remove(pending_path) if plan.pending_note_count else None
+    if pending is not None:
+        paths.append(pending_path)
+    snapshot = snapshot_paths(
+        kb_dir,
+        paths,
+        operation="remove",
+        details={"doc_name": plan.doc_name},
+        hardlink_dirs={plan.images_dir},
+    )
+    try:
+        if pending is not None:
+            pending.remove_document(plan.doc_name)
+        result = _apply_remove_plan(kb_dir, plan, registry, keep_empty=keep_empty)
+        # A PageIndex cleanup error is a supported partial result. The
+        # registry entry remains for retry, and completed wiki edits stick.
+        snapshot.mark_committed()
+    except BaseException:
+        if snapshot.rollback_best_effort() is None:
+            snapshot.discard_best_effort()
+        raise
+    snapshot.discard_best_effort()
+    return result
+
+
+def _apply_remove_plan(
     kb_dir: Path,
     plan: RemovePlan,
     registry,
     *,
     keep_empty: bool,
 ) -> RemoveResult:
-    """Carry out a remove plan. Registry write is the commit point.
+    """Apply the removal under the caller's active mutation journal.
 
-    Every step before ``registry.remove_by_hash`` is idempotent, so a
-    PageIndex failure leaves the entry (with its ``doc_id``) intact for a
-    retry. The ``lint --fix`` scope is limited to the pages this remove
-    actually touched (modified concept + entity pages ∪ index.md) so the
-    sweep doesn't strip pre-existing dangling links in unrelated pages
-    (issue #58).
+    Steps before registry removal are safe to retry. If PageIndex cleanup
+    fails, its doc_id stays in the registry for that retry. Scope link repair
+    to modified topic pages and the index to preserve unrelated pages with
+    pre-existing dangling links.
     """
     from openkb.agent.compiler import (
         remove_doc_from_concept_pages,
@@ -1636,8 +1741,8 @@ def run_remove_for_api(
     from openkb.state import HashRegistry
 
     openkb_dir = kb_dir / ".openkb"
-    registry = HashRegistry(openkb_dir / "hashes.json")
     with kb_ingest_lock(openkb_dir):
+        registry = HashRegistry(openkb_dir / "hashes.json")
         matches = _resolve_doc_identifier(registry, identifier)
         if not matches:
             return {"status": "not_found", "identifier": identifier}
@@ -1716,13 +1821,19 @@ def remove(ctx, identifier, keep_raw, keep_empty, dry_run, yes):
     IDENTIFIER may be the original filename ("paper.pdf"), the doc_name
     slug ("paper-a1b2c3d4e5f6"), or a substring that uniquely matches one.
 
-    Deletes the doc's summary and source files, prunes the doc from
-    concept- and entity-page frontmatter and Related Documents sections,
-    drops the Documents entry from index.md, removes the hash entry, and
-    finally runs `lint --fix` to clean any dangling wikilinks.
-
+    Deletes the doc's summary and source files, removes its citations from
+    concept and entity pages, and cleans up the index and hash entry.
+    Wikilink repair is limited to modified topic pages and the index.
     Concept and entity pages whose only source was this doc are deleted by
-    default; use --keep-empty to retain them.
+    default. Use --keep-empty to retain them.
+
+    Removes the document's buffered concept and entity notes and drops
+    topics left with no notes. The preview shows the purge count when
+    matching notes exist. If the pending-topic store is invalid or
+    unreadable, OpenKB logs a warning and skips that cleanup.
+
+    The preview classifies topic-page edits by frontmatter sources.
+    Removal can also clean up citations that appear only in page bodies.
     """
     from openkb.state import HashRegistry
 
@@ -2098,8 +2209,15 @@ def consolidate(ctx, page_name, all_pages, min_notes, dry_run, yes):
     selected, unless you pass ``--yes``.
 
     Consolidation replaces the entire Markdown body, including existing prose
-    and manual edits. It preserves frontmatter, except that it can refresh
-    ``description:``.
+    and manual edits. OpenKB requires a valid YAML mapping in the frontmatter
+    and rejects truncated responses or rewrites with no usable body.
+    OpenKB accepts a replacement description only when the model supplies a
+    nonempty, single-line string, then updates the frontmatter and the entry
+    in wiki/index.md together.
+
+    The final counts distinguish consolidated, skipped, and failed pages.
+    The command exits with status 1 if any page fails. Successful rewrites
+    in the same batch are retained.
     """
     from openkb.agent import consolidator
 
@@ -2171,13 +2289,14 @@ def consolidate(ctx, page_name, all_pages, min_notes, dry_run, yes):
 
     consolidated = 0
     skipped = 0
+    failed = 0
     for (page_dir, slug, _count), (ok, exc, elapsed) in zip(targets, results):
         if exc is not None:
             click.echo(f"  [ERROR] Consolidation failed: {exc}")
             logging.getLogger(__name__).debug(
                 "Consolidate traceback for %s/%s:", page_dir, slug, exc_info=exc
             )
-            skipped += 1
+            failed += 1
         elif ok:
             click.echo(f"  [OK] {page_dir}/{slug} ({elapsed:.1f}s)")
             consolidated += 1
@@ -2185,8 +2304,11 @@ def consolidate(ctx, page_name, all_pages, min_notes, dry_run, yes):
             click.echo(f"  [SKIP] {page_dir}/{slug} (no pending notes).")
             skipped += 1
 
-    click.echo(f"\nDone: consolidated {consolidated}, skipped {skipped}.")
-    append_log(wiki_dir, "consolidate", f"consolidated {consolidated}, skipped {skipped}")
+    counts = f"consolidated {consolidated}, skipped {skipped}, failed {failed}"
+    click.echo(f"\nDone: {counts}.")
+    append_log(wiki_dir, "consolidate", counts)
+    if failed:
+        ctx.exit(1)
 
 
 async def iter_recompile(
@@ -2630,7 +2752,11 @@ async def run_lint(kb_dir: Path) -> Path | None:
 )
 @click.pass_context
 def lint(ctx, fix):
-    """Lint the knowledge base for structural and semantic inconsistencies."""
+    """Lint the knowledge base for structural and semantic inconsistencies.
+
+    With --fix, links accepted by the broken-link check are preserved,
+    including links to an existing wiki page by filename stem alone.
+    """
     kb_dir = _find_kb_dir(ctx.obj.get("kb_dir_override"))
     if kb_dir is None:
         click.echo("No knowledge base found. Run `openkb init` first.")

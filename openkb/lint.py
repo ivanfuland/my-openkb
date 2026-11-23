@@ -70,7 +70,8 @@ def strip_ghost_wikilinks(
 
     For each ``[[X]]`` or ``[[X|alias]]`` in ``content``:
 
-    - If ``X`` is in ``known_targets`` exactly, the link is kept as-is.
+    - If ``X`` is in ``known_targets`` after trimming surrounding whitespace
+      and slashes, the link is kept as-is.
     - Otherwise, ``X`` is normalized (see :func:`_normalize_target`) and
       matched against the normalized form of each known target. On a hit,
       the link is rewritten to the canonical target form.
@@ -105,6 +106,7 @@ def strip_ghost_wikilinks(
             target = raw.strip()
             alias = None
 
+        target = target.strip("/")
         # Direct hit
         if target in known_targets:
             return m.group(0)
@@ -193,9 +195,9 @@ def fix_broken_links(
 
     For each Markdown page under ``wiki`` (excluding ``reports/`` and
     ``sources/`` and excluded files), runs :func:`strip_ghost_wikilinks`
-    against the set of valid targets currently on disk. Targets that match
-    fuzzily (case, ``_`` vs ``-``, NFKC) are rewritten to canonical form;
-    targets that have no match are demoted to plain text.
+    against the same page keys used by :func:`find_broken_links`. Targets
+    that match fuzzily (case, ``_`` vs ``-``, NFKC) are rewritten to canonical
+    form. Targets that have no match are demoted to plain text.
 
     Args:
         wiki: Path to the wiki root directory.
@@ -213,12 +215,7 @@ def fix_broken_links(
     Returns:
         Tuple of ``(files_changed, ghosts_stripped)``.
     """
-    pages = _all_wiki_pages(wiki)
-    # The same fuzzy normalization _all_wiki_pages stores both the full
-    # relative path (e.g. ``concepts/attention``) and the bare stem
-    # (``attention``). Use the full-path keys so that links like
-    # ``[[concepts/foo]]`` resolve against ``concepts/`` files only.
-    known_targets: set[str] = {key for key in pages if "/" in key or key == "index"}
+    known_targets = set(_all_wiki_pages(wiki))
     # Build the normalized index once and reuse across every file —
     # otherwise strip_ghost_wikilinks would rebuild it per file (O(F·M)).
     norm_index = build_norm_index(known_targets)

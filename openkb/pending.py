@@ -11,6 +11,7 @@ import datetime
 import json
 from pathlib import Path
 
+from openkb.frontmatter import single_line_description
 from openkb.locks import atomic_write_json
 
 #: Number of distinct documents required in the buffer before a note from
@@ -18,13 +19,20 @@ from openkb.locks import atomic_write_json
 MAX_NOTES_BEFORE_PROMOTION = 2
 
 
+_TOPIC_KINDS = ("concepts", "entities")
+
+
+def pending_topics_path(kb_dir: Path) -> Path:
+    return kb_dir / ".openkb" / "pending_topics.json"
+
+
 class PendingTopicsStore:
     """Persistent buffer of not-yet-paged concept/entity candidates.
 
-    Persisted as ``kb_dir/.openkb/pending_topics.json`` (same directory
-    convention as ``state.HashRegistry``'s ``hashes.json``). Callers already
-    hold the KB's exclusive lock (``@_with_kb_lock`` wraps every `add`/
-    `add-all` run in ``cli.py``), so no additional locking is needed here.
+    Persisted as ``kb_dir/.openkb/pending_topics.json`` alongside the hash
+    registry. Callers must hold the KB's exclusive lock across load and
+    mutation. Loading rejects invalid data so a later write cannot silently
+    replace the buffer with an empty store.
     """
 
     def __init__(self, path: Path) -> None:
@@ -32,13 +40,42 @@ class PendingTopicsStore:
         if path.exists():
             with path.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            self._data: dict[str, dict[str, dict]] = data if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                raise ValueError(f"{path}: pending topics must be a JSON object")
+            self._data: dict[str, dict[str, dict]] = data
         else:
             self._data = {}
-        for kind in ("concepts", "entities"):
-            for entry in self._data.setdefault(kind, {}).values():
-                by_doc = {note["doc_name"]: note for note in entry.get("notes", [])}
+        for kind in _TOPIC_KINDS:
+            topics = self._data.setdefault(kind, {})
+            if not isinstance(topics, dict):
+                raise ValueError(f"{path}: pending {kind} must be a JSON object")
+            for entry in topics.values():
+                if not isinstance(entry, dict) or not isinstance(entry.get("notes", []), list):
+                    raise ValueError(f"{path}: invalid pending {kind} entry")
+                by_doc: dict[str, dict] = {}
+                for note in entry.get("notes", []):
+                    if not isinstance(note, dict) or not all(
+                        isinstance(note.get(field), str)
+                        for field in ("doc_name", "source_file", "note")
+                    ):
+                        raise ValueError(f"{path}: invalid pending {kind} note")
+                    doc = note["doc_name"]
+                    if not doc or doc in {".", ".."} or "/" in doc or "\\" in doc:
+                        raise ValueError(f"{path}: invalid pending document name {doc!r}")
+                    by_doc[doc] = note
                 entry["notes"] = list(by_doc.values())
+
+    def document_names(self) -> set[str]:
+        """Earlier summaries that a promotion may need to backlink."""
+        return {note["doc_name"] for note in self._all_notes()}
+
+    def count_document_notes(self, doc_name: str) -> int:
+        return sum(note["doc_name"] == doc_name for note in self._all_notes())
+
+    def _all_notes(self):
+        for kind in _TOPIC_KINDS:
+            for entry in self._data[kind].values():
+                yield from entry["notes"]
 
     def get(self, kind: str, slug: str) -> dict | None:
         """Return the pending entry for ``slug`` in ``kind``, or None."""
@@ -85,7 +122,10 @@ class PendingTopicsStore:
             "source_file": source_file,
             "note": note,
             "date": datetime.date.today().isoformat(),
+            "description": description,
         }
+        if type_ is not None:
+            new_note["type"] = type_
         for i, buffered in enumerate(notes):
             if buffered["doc_name"] == doc_name:
                 notes[i] = new_note
@@ -105,6 +145,34 @@ class PendingTopicsStore:
         if slug in self._data[kind]:
             del self._data[kind][slug]
             self._persist()
+
+    def remove_document(self, doc_name: str) -> int:
+        """Purge a document's notes in both namespaces and prune empty topics."""
+        removed = 0
+        for kind in _TOPIC_KINDS:
+            topics = self._data[kind]
+            for slug, entry in list(topics.items()):
+                notes = entry["notes"]
+                surviving = [note for note in notes if note["doc_name"] != doc_name]
+                if len(surviving) == len(notes):
+                    continue
+                removed += len(notes) - len(surviving)
+                if not surviving:
+                    del topics[slug]
+                    continue
+                entry["notes"] = surviving
+                # Legacy notes lack per-document metadata. Use surviving text
+                # as a brief instead of carrying forward the removed brief.
+                latest = surviving[-1]
+                entry["description"] = (
+                    single_line_description(latest.get("description"))
+                    or (" ".join(latest["note"].split())[:100])
+                )
+                if kind == "entities":
+                    entry["type"] = latest.get("type", "other")
+        if removed:
+            self._persist()
+        return removed
 
     def brief_lines(self, kind: str) -> list[str]:
         """Return ``- {slug} (pending, {n}/{total} mentions) — {description}`` lines.

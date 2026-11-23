@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -2634,11 +2635,14 @@ class TestPendingBufferLifecycle:
             responses.append(RuntimeError("promotion failed"))
         else:
             monkeypatch.setattr(
-                "openkb.agent.compiler_notes.atomic_write_text",
+                "openkb.agent.compiler.atomic_write_text",
                 MagicMock(side_effect=OSError("promotion failed")),
             )
 
-        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+        with (
+            patch("openkb.agent.compiler.litellm") as mock_litellm,
+            pytest.raises(OSError, match="promotion failed") if mode == "append" else nullcontext(),
+        ):
             mock_litellm.completion = MagicMock(side_effect=_mock_completion([plan]))
             mock_litellm.acompletion = AsyncMock(side_effect=responses)
             await _compile_concepts(
@@ -2653,7 +2657,8 @@ class TestPendingBufferLifecycle:
                 concept_update_mode=mode,
             )
 
-        assert "promotion failed" in caplog.text
+        if mode == "rewrite":
+            assert "promotion failed" in caplog.text
         assert not (wiki / kind / f"{slug}.md").exists()
         store = PendingTopicsStore(tmp_path / ".openkb" / "pending_topics.json")
         entry = store.get(kind, slug)
