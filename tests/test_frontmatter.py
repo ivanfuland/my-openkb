@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import yaml
 
 from openkb import frontmatter as fm
@@ -50,6 +51,10 @@ class TestSplit:
     def test_unterminated_frontmatter(self):
         assert fm.split("---\ntype: x\nbut no close") is None
 
+    def test_delimiters_are_full_lines(self):
+        assert fm.split("---prefix\ntype: x\n---\nbody") is None
+        assert fm.split("---\ntype: x\n---suffix\nbody") is None
+
 
 class TestParse:
     def test_basic(self):
@@ -68,6 +73,16 @@ class TestParse:
         assert fm.parse("---\nfoo: [unclosed\n---\n") == {}
 
 
+class TestSingleLineDescription:
+    @pytest.mark.parametrize("value", ["  A brief.  ", "A brief.\n", "\r\n A brief.\r\n"])
+    def test_strips_surrounding_whitespace(self, value):
+        assert fm.single_line_description(value) == "A brief."
+
+    @pytest.mark.parametrize("value", ["\n\r", "one\ntwo", "one\rtwo", "one\x00two", ["one"]])
+    def test_omits_invalid_briefs(self, value):
+        assert fm.single_line_description(value) == ""
+
+
 class TestSetLine:
     def test_replaces_existing(self):
         out = fm.set_line('---\ntype: "Old"\n---\n', "type", "New")
@@ -78,6 +93,12 @@ class TestSetLine:
         out = fm.set_line('---\nsources: ["a"]\n---\n', "type", "Concept")
         assert 'type: "Concept"' in out
         assert 'sources: ["a"]' in out
+
+    def test_replaces_block_scalar_with_blank_lines(self):
+        block = "---\ndescription: |\n  first line\n\n\n  second line\ncustom:\n  keep: true\n---\n"
+        assert fm.set_line(block, "description", "New brief") == (
+            '---\ndescription: "New brief"\ncustom:\n  keep: true\n---\n'
+        )
 
     def test_value_with_regex_backref_is_literal(self):
         out = fm.set_line('---\ndescription: "old"\n---\n', "description", r"a\1b")

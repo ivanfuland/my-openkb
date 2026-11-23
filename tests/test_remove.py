@@ -504,6 +504,48 @@ def test_cli_remove_yes_executes_full_plan(kb_dir):
     assert "remove" in (kb_dir / "wiki" / "log.md").read_text()
 
 
+def test_cli_remove_rolls_back_pages_that_reference_doc_only_in_body(kb_dir):
+    _seed_two_doc_kb(kb_dir)
+    args = ["remove", "attention.pdf"]
+    preview = _invoke(kb_dir, [*args, "--dry-run"])
+    assert preview.exit_code == 0, preview.output
+
+    wiki = kb_dir / "wiki"
+    concept = wiki / "concepts" / "body-only.md"
+    entity = wiki / "entities" / "body-only.md"
+    entity.parent.mkdir()
+    concept.write_text(
+        '---\nsources: ["summaries/llm-h_l.md"]\n---\n\n'
+        "## Related Documents\n- [[summaries/attention-h_a]]\n",
+        encoding="utf-8",
+    )
+    entity.write_text(
+        "## Notes\n- **2026-01-01** Quoted note. ([[summaries/attention-h_a]])\n\n"
+        "A [[missing-page|reference]].\n",
+        encoding="utf-8",
+    )
+    after_seeding = _invoke(kb_dir, [*args, "--dry-run"])
+    assert after_seeding.exit_code == 0, after_seeding.output
+    assert after_seeding.output == preview.output
+    originals = {path: path.read_bytes() for path in (concept, entity)}
+    hashes = kb_dir / ".openkb" / "hashes.json"
+    original_hashes = hashes.read_bytes()
+
+    def fail_after_cleanup(*args):
+        assert "[[summaries/attention-h_a]]" not in concept.read_text(encoding="utf-8")
+        assert entity.read_text(encoding="utf-8").strip() == "## Notes\n\nA reference."
+        assert "h_a" not in json.loads(hashes.read_bytes())
+        raise OSError("remove log failure")
+
+    with patch("openkb.cli.append_log", side_effect=fail_after_cleanup):
+        result = _invoke(kb_dir, [*args, "--yes"])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, OSError)
+    assert str(result.exception) == "remove log failure"
+    assert {path: path.read_bytes() for path in originals} == originals
+    assert hashes.read_bytes() == original_hashes
+
+
 def test_cli_remove_keep_raw_preserves_file(kb_dir):
     _seed_two_doc_kb(kb_dir)
     result = _invoke(kb_dir, ["remove", "attention.pdf", "--keep-raw", "--yes"])

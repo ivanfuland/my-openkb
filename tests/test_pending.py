@@ -35,6 +35,7 @@ def test_add_note_creates_entry_and_returns_count(tmp_path):
             "source_file": "summaries/doc-1.md",
             "note": "first note",
             "date": entry["notes"][0]["date"],
+            "description": "A mechanism for weighting input relevance.",
         }
     ]
 

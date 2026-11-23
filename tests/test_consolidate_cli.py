@@ -82,7 +82,7 @@ class TestConsolidateExecution:
         args = mock_c.call_args.args
         assert args[1] == "concepts"
         assert args[2] == "approval-workflows"
-        assert "Done: consolidated 1, skipped 0." in result.output
+        assert "Done: consolidated 1, skipped 0, failed 0." in result.output
         log_text = (kb_dir / "wiki" / "log.md").read_text(encoding="utf-8")
         assert "consolidate" in log_text
 
@@ -97,7 +97,7 @@ class TestConsolidateExecution:
 
         assert result.exit_code == 0, result.output
         mock_c.assert_called_once()
-        assert "Done: consolidated 1, skipped 0." in result.output
+        assert "Done: consolidated 1, skipped 0, failed 0." in result.output
 
     def test_skip_result_counts_as_skipped(self, kb_dir):
         _seed_page_with_notes(kb_dir)
@@ -109,21 +109,22 @@ class TestConsolidateExecution:
             result = _invoke(kb_dir, ["consolidate", "approval-workflows"])
 
         assert result.exit_code == 0, result.output
-        assert "Done: consolidated 0, skipped 1." in result.output
+        assert "Done: consolidated 0, skipped 1, failed 0." in result.output
 
-    def test_exception_in_one_page_reported_as_error_not_fatal(self, kb_dir):
+    @pytest.mark.parametrize("message", ["boom", "boom\nmore details"])
+    def test_exception_in_one_page_reported_as_error_not_fatal(self, kb_dir, message):
         _seed_page_with_notes(kb_dir, slug="approval-workflows")
         _seed_page_with_notes(kb_dir, slug="second-page")
         with patch(
             "openkb.agent.consolidator.consolidate_page",
             new_callable=AsyncMock,
-            side_effect=[ValueError("boom"), True],
+            side_effect=[ValueError(message), True],
         ):
             result = _invoke(kb_dir, ["consolidate", "--all", "--yes"])
 
-        assert result.exit_code == 0, result.output
-        assert "[ERROR] Consolidation failed: boom" in result.output
-        assert "Done: consolidated 1, skipped 1." in result.output
+        assert result.exit_code == 1, result.output
+        assert f"\n  [ERROR] Consolidation failed: {message}\n" in result.output
+        assert "Done: consolidated 1, skipped 0, failed 1." in result.output
 
 
 def _set_config(kb_dir, config: dict) -> None:
@@ -172,7 +173,7 @@ class TestConsolidateModel:
         assert model == "anthropic/claude-sonnet-4-5"
         # Provider detection must see the consolidate model, not `model`.
         mock_setup.assert_called_once_with(kb_dir, model_override="anthropic/claude-sonnet-4-5")
-        assert "Done: consolidated 1, skipped 0." in result.output
+        assert "Done: consolidated 1, skipped 0, failed 0." in result.output
 
     def test_falls_back_to_model_when_consolidate_model_absent(self, kb_dir):
         _, model, mock_setup = self._run(kb_dir, {"model": "openai/gpt-4o"})

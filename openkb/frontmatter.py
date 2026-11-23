@@ -1,10 +1,8 @@
 """Shared helpers for the YAML frontmatter blocks of OpenKB wiki pages.
 
 Single source of truth for building, splitting, parsing, and mutating the
-``---`` frontmatter used by summaries / concepts / entities. The closing
-delimiter is always matched at the start of a line (``\\n---``), so a ``---``
-that appears inside a quoted value never truncates the block — the failure
-mode that ad-hoc ``text.find("---", 3)`` parsing was prone to.
+``---`` frontmatter used by summaries / concepts / entities. The delimiters
+must occupy entire lines so a value containing dashes isn't truncated.
 """
 
 from __future__ import annotations
@@ -53,58 +51,75 @@ def parse_list_value(line: str) -> list[str] | None:
     return [str(x) for x in parsed]
 
 
+_OPENING_FENCE = re.compile(r"\A---[ \t]*\r?\n")
+_CLOSING_FENCE = re.compile(r"^---[ \t]*(?:\r?\n|\Z)", re.MULTILINE)
+
+
 def split(text: str) -> tuple[str, str] | None:
-    """Split ``text`` into ``(frontmatter_block, body)``.
-
-    ``frontmatter_block`` includes both ``---`` delimiters and the newline that
-    ends the closing delimiter line; ``body`` is everything after, so
-    ``frontmatter_block + body == text`` exactly (lossless).
-
-    Returns ``None`` when ``text`` has no well-formed frontmatter: no leading
-    ``---`` or no line-anchored closing ``---``. Because the closing delimiter
-    must start a line (``\\n---``), a ``---`` inside a quoted value is ignored.
-    """
-    if not text.startswith("---"):
+    """Split a fenced page losslessly into ``(frontmatter_block, body)``."""
+    opening = _OPENING_FENCE.match(text)
+    if opening is None:
         return None
-    nl = text.find("\n---", 3)
-    if nl == -1:
+    closing = _CLOSING_FENCE.search(text, opening.end())
+    if closing is None:
         return None
-    after = text.find("\n", nl + 1)  # newline ending the closing '---' line
-    if after == -1:
-        return text, ""
-    return text[: after + 1], text[after + 1 :]
+    return text[: closing.end()], text[closing.end() :]
+
+
+def parse_required(text: str) -> dict:
+    """Read a fenced YAML mapping, raising before an unsafe page rewrite."""
+    parts = split(text)
+    if parts is None:
+        raise ValueError("Missing or unterminated YAML frontmatter")
+    lines = parts[0].splitlines(keepends=True)
+    try:
+        data = yaml.safe_load("".join(lines[1:-1]))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML frontmatter: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("YAML frontmatter must be a mapping")
+    return data
 
 
 def parse(text: str) -> dict:
     """Return the frontmatter as a dict (``{}`` when absent or malformed)."""
-    parts = split(text)
-    if parts is None:
-        return {}
-    fm_block = parts[0]
-    inner = fm_block[3:]  # drop opening '---'
-    close = inner.rfind("\n---")  # drop closing '---' line
-    if close != -1:
-        inner = inner[:close]
     try:
-        data = yaml.safe_load(inner)
-    except yaml.YAMLError:
+        return parse_required(text)
+    except ValueError:
         return {}
-    return data if isinstance(data, dict) else {}
+
+
+def strip_model_frontmatter(text: str) -> str:
+    """Discard model-supplied metadata before checking the replacement body."""
+    text = text.lstrip("\r\n")
+    while (parts := split(text)) is not None:
+        text = parts[1].lstrip("\r\n")
+    if _OPENING_FENCE.match(text):
+        raise ValueError("Model response has unterminated YAML frontmatter")
+    return text
+
+
+def single_line_description(value: object) -> str:
+    """Normalize a model brief, omitting values unsuitable for an index row."""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if value.splitlines() == [value] and "\x00" not in value:
+        return value
+    return ""
 
 
 def set_line(fm_block: str, key: str, value: str) -> str:
-    """Set or insert a single scalar ``key:`` line in a frontmatter block.
-
-    Replaces an existing line for ``key``; otherwise inserts it right after the
-    opening ``---``. A lambda replacement is used so values containing regex
-    backrefs (``\\1``, ``\\g<…>``) are inserted literally.
-    """
+    """Replace a top-level scalar (including its indented continuations)."""
     line = kv_line(key, value)
-    if re.search(rf"^{re.escape(key)}:", fm_block, flags=re.MULTILINE):
-        return re.sub(
-            rf"^{re.escape(key)}:.*", lambda _m: line, fm_block, count=1, flags=re.MULTILINE
-        )
-    return fm_block.replace("---\n", f"---\n{line}\n", 1)
+    key_pattern = re.escape(key)
+    key_start = rf'''^(?:{key_pattern}|"{key_pattern}"|'{key_pattern}'):'''
+    continuations = r"[^\r\n]*(?:\r?\n(?:[ \t]*\r?\n)*[ \t]+[^\r\n]*)*"
+    pattern = key_start + continuations
+    updated, count = re.subn(pattern, lambda _m: line, fm_block, count=1, flags=re.MULTILINE)
+    if count:
+        return updated
+    return _OPENING_FENCE.sub(lambda m: f"{m[0]}{line}\n", fm_block, count=1)
 
 
 def drop_line(fm_block: str, key: str) -> str:
