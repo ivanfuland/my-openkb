@@ -23,6 +23,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from openkb.agent import compiler
@@ -209,6 +210,30 @@ def test_recompile_all_requires_confirmation(kb_dir):
     assert result.exit_code == 0, result.output
     assert "Aborted" in result.output
     short.assert_not_called()
+
+
+@pytest.mark.parametrize("args", [("notes.md", "--dry-run"), ("--all", "--dry-run"), ("--all",)])
+@pytest.mark.parametrize("mode", [None, "rewrite", "invalid"])
+def test_recompile_preview_reports_update_mode(kb_dir, args, mode):
+    _seed_short(kb_dir)
+    if mode is not None:
+        (kb_dir / ".openkb" / "config.yaml").write_text(
+            f"concept_update_mode: {mode}\n", encoding="utf-8"
+        )
+    with patch("openkb.agent.compiler.compile_short_doc") as short:
+        result = _invoke(kb_dir, ["recompile", *args], input_text="n\n")
+
+    assert result.exit_code == 0, result.output
+    short.assert_not_called()
+    assert "regenerates short-document summaries" in result.output
+    if mode == "rewrite":
+        assert "rewrites concept and entity pages" in result.output
+        assert "can overwrite manual edits" in result.output
+        assert "## Notes" not in result.output
+    else:
+        assert "adds or replaces notes under ## Notes on concept and entity pages" in result.output
+        assert "preserving existing prose" in result.output
+        assert "overwrite manual edits" not in result.output
 
 
 def test_recompile_all_yes_bypasses_confirmation(kb_dir):
