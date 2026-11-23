@@ -11,6 +11,9 @@ from typing import Any, Iterator
 
 import yaml
 
+from openkb.compiler_config import VALID_CONCEPT_UPDATE_MODES as VALID_CONCEPT_UPDATE_MODES
+from openkb.compiler_config import resolve_concept_update_mode as resolve_concept_update_mode
+from openkb.compiler_config import resolve_strict_item_mode as resolve_strict_item_mode
 from openkb.locks import atomic_write_text, flock, funlock
 
 logger = logging.getLogger(__name__)
@@ -36,6 +39,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # global/KB list overrides it wholesale; resolve_entity_types cleans the
     # effective value on read.
     "entity_types": list(DEFAULT_ENTITY_TYPES),
+    # How concept/entity pages absorb new documents on `openkb add` — see
+    # resolve_concept_update_mode(). KB config.yaml only (like `debug`), not
+    # in GLOBAL_SCALAR_KEYS.
+    "concept_update_mode": "rewrite",
+    # Opt-in strict mode for brand-new concept/entity `create` items — see
+    # resolve_strict_item_mode(). KB config.yaml only, not in
+    # GLOBAL_SCALAR_KEYS (same treatment as concept_update_mode above).
+    "strict_item_mode": False,
+    # Per-list character cap for the concept/entity briefs in the compile plan
+    # prompt. Those lists are O(KB) and are rebuilt for every compiled document,
+    # so without a ceiling a large KB eventually exceeds the model's context
+    # window mid-recompile. 0 disables trimming.
+    "briefs_budget_chars": 120_000,
 }
 
 GLOBAL_CONFIG_DIR = Path.home() / ".config" / "openkb"
@@ -239,10 +255,8 @@ def resolve_timeout(config: dict) -> float | None:
 
 
 def resolve_concurrency(config: dict) -> int | None:
-    """Resolve the optional ``concurrency:`` key — the cap on concurrent LLM
-    calls OpenKB makes during ingest (PageIndex indexing and concept/entity
-    compilation alike; they never run at the same time for one document, so
-    one setting covers both).
+    """Resolve the optional ``concurrency:`` cap for LLM calls during
+    PageIndex indexing, concept/entity compilation, and consolidation.
 
     Returns ``None`` when absent, explicitly ``null``, or invalid (rejecting
     bools and non-positive values with a warning when present but unusable —

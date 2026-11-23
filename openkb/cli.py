@@ -1894,8 +1894,10 @@ def recompile(ctx, doc_name, all_docs, dry_run, yes, refresh_schema):
     slug, or unique substring). ``--all`` recompiles every indexed doc.
     Exactly one of DOC_NAME or ``--all`` is required.
 
-    Side effect: this regenerates summaries (short docs) and rewrites concept
-    pages with the current logic — manual edits to those pages are overwritten.
+    Recompiling regenerates short-document summaries. Existing concept and
+    entity pages follow ``concept_update_mode``. In ``rewrite`` mode the LLM
+    rewrites the page body and can overwrite manual edits. In ``append`` mode
+    OpenKB records source-linked notes for these updates.
     """
     from openkb.state import HashRegistry
 
@@ -2053,6 +2055,135 @@ def recompile(ctx, doc_name, all_docs, dry_run, yes, refresh_schema):
 
     click.echo(f"\nDone: recompiled {recompiled}, skipped {skipped}.")
     append_log(wiki_dir, "recompile", f"recompiled {recompiled}, skipped {skipped}")
+
+
+@cli.command()
+@click.argument("page_name", required=False)
+@click.option(
+    "--all", "all_pages", is_flag=True, default=False, help="Consolidate every pending page."
+)
+@click.option(
+    "--min-notes",
+    type=int,
+    default=1,
+    show_default=True,
+    help="With --all, only consider pages with at least this many pending notes.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="List the pages that would be consolidated; no LLM calls, no writes.",
+)
+@click.option(
+    "--yes", "-y", is_flag=True, default=False, help="Skip the --all confirmation prompt."
+)
+@click.pass_context
+@_with_kb_lock(exclusive=True)
+def consolidate(ctx, page_name, all_pages, min_notes, dry_run, yes):
+    """Fold a concept/entity page's accumulated "## Notes" into curated prose.
+
+    Use this for pages with ``## Notes`` from ``concept_update_mode: append``.
+    Consolidation uses one LLM call per page. The prompt asks the LLM to
+    describe discrepancies between sources in the new prose.
+
+    Specify exactly one of PAGE_NAME or ``--all``. PAGE_NAME matches an exact
+    concept or entity slug first, then a unique substring. ``--all`` selects
+    pages with at least ``--min-notes`` notes and processes them concurrently
+    using the KB's ``concurrency`` setting. Preview the selection with
+    ``--dry-run``. ``--all`` prompts for confirmation when multiple pages are
+    selected, unless you pass ``--yes``.
+
+    Consolidation replaces the entire Markdown body, including existing prose
+    and manual edits. It preserves frontmatter, except that it can refresh
+    ``description:``.
+    """
+    from openkb.agent import consolidator
+
+    if bool(page_name) == bool(all_pages):
+        click.echo("Specify exactly one of PAGE_NAME or --all.")
+        return
+
+    kb_dir = _find_kb_dir(ctx.obj.get("kb_dir_override"))
+    if kb_dir is None:
+        click.echo("No knowledge base found. Run `openkb init` first.")
+        return
+    wiki_dir = kb_dir / "wiki"
+
+    if page_name:
+        matches = consolidator.resolve_page(wiki_dir, page_name)
+        if not matches:
+            click.echo(f"No concept/entity page matching '{page_name}' found.")
+            return
+        if len(matches) > 1:
+            click.echo(f"'{page_name}' matches multiple pages:")
+            for page_dir, slug in matches:
+                click.echo(f"  - {page_dir}/{slug}")
+            return
+        page_dir, slug = matches[0]
+        targets = [
+            (
+                page_dir,
+                slug,
+                consolidator.count_pending_notes(
+                    (wiki_dir / page_dir / f"{slug}.md").read_text(encoding="utf-8")
+                ),
+            )
+        ]
+    else:
+        targets = consolidator.find_consolidation_candidates(wiki_dir, min_notes=min_notes)
+        if not targets:
+            click.echo("No pages with pending notes found.")
+            return
+
+    if dry_run:
+        click.echo(f"Would consolidate {len(targets)} page(s):")
+        for page_dir, slug, count in targets:
+            click.echo(f"  - {page_dir}/{slug}  ({count} note(s))")
+        click.echo("(dry-run — nothing modified)")
+        return
+
+    if all_pages and not yes and len(targets) > 1:
+        click.echo(
+            f"This will consolidate {len(targets)} page(s), replacing each "
+            'page\'s "## Notes" section with rewritten prose.'
+        )
+        if not click.confirm("Proceed?", default=False):
+            click.echo("Aborted.")
+            return
+
+    _setup_llm_key(kb_dir)
+    config = resolve_effective_config(kb_dir)[0]
+    model: str = config.get("model", DEFAULT_CONFIG["model"])
+    language: str = config.get("language", "en")
+    max_concurrency = resolve_concurrency(config) or DEFAULT_COMPILE_CONCURRENCY
+
+    total = len(targets)
+    click.echo(f"Consolidating {total} page(s) (concurrency={max_concurrency})...")
+    for page_dir, slug, count in targets:
+        click.echo(f"  - {page_dir}/{slug} ({count} note(s))")
+    results = asyncio.run(
+        consolidator.consolidate_pages(wiki_dir, targets, model, language, max_concurrency)
+    )
+
+    consolidated = 0
+    skipped = 0
+    for (page_dir, slug, _count), (ok, exc, elapsed) in zip(targets, results):
+        if exc is not None:
+            click.echo(f"  [ERROR] Consolidation failed: {exc}")
+            logging.getLogger(__name__).debug(
+                "Consolidate traceback for %s/%s:", page_dir, slug, exc_info=exc
+            )
+            skipped += 1
+        elif ok:
+            click.echo(f"  [OK] {page_dir}/{slug} ({elapsed:.1f}s)")
+            consolidated += 1
+        else:
+            click.echo(f"  [SKIP] {page_dir}/{slug} (no pending notes).")
+            skipped += 1
+
+    click.echo(f"\nDone: consolidated {consolidated}, skipped {skipped}.")
+    append_log(wiki_dir, "consolidate", f"consolidated {consolidated}, skipped {skipped}")
 
 
 async def iter_recompile(
