@@ -101,8 +101,11 @@ def strip_model_frontmatter(text: str) -> str:
 
 def single_line_description(value: object) -> str:
     """Normalize a model brief, omitting values unsuitable for an index row."""
-    if isinstance(value, str) and value and value.splitlines() == [value] and "\x00" not in value:
-        return value.strip()
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if value.splitlines() == [value] and "\x00" not in value:
+        return value
     return ""
 
 

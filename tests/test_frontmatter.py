@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import yaml
 
 from openkb import frontmatter as fm
@@ -70,6 +71,16 @@ class TestParse:
     def test_malformed_yaml_returns_empty(self):
         # an unclosed flow sequence makes safe_load raise; we must degrade to {}
         assert fm.parse("---\nfoo: [unclosed\n---\n") == {}
+
+
+class TestSingleLineDescription:
+    @pytest.mark.parametrize("value", ["  A brief.  ", "A brief.\n", "\r\n A brief.\r\n"])
+    def test_strips_surrounding_whitespace(self, value):
+        assert fm.single_line_description(value) == "A brief."
+
+    @pytest.mark.parametrize("value", ["\n\r", "one\ntwo", "one\rtwo", "one\x00two", ["one"]])
+    def test_omits_invalid_briefs(self, value):
+        assert fm.single_line_description(value) == ""
 
 
 class TestSetLine:

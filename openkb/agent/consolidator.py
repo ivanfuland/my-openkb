@@ -93,7 +93,8 @@ def _split_notes(body: str) -> tuple[str, str]:
 
 def count_pending_notes(text: str) -> int:
     """Count ``## Notes`` bullet lines in a page's raw text (0 if none)."""
-    _, notes = _split_notes(text)
+    parts = frontmatter.split(text)
+    _, notes = _split_notes(parts[1] if parts is not None else text)
     if not notes:
         return 0
     return sum(1 for ln in notes.split("\n") if ln.lstrip().startswith("- **"))
@@ -154,14 +155,14 @@ async def consolidate_page(
 
     path = wiki_dir / page_dir / f"{slug}.md"
     text = path.read_text(encoding="utf-8")
-    fm = frontmatter.parse_required(text)
     parts = frontmatter.split(text)
-    assert parts is not None  # parse_required checked the delimiters
-    fm_block, body = parts
-    existing_content, notes_content = _split_notes(body.lstrip("\n"))
+    existing_content, notes_content = _split_notes(parts[1] if parts is not None else text)
     if not notes_content:
         return False
 
+    fm = frontmatter.parse_required(text)
+    assert parts is not None  # parse_required checked the delimiters
+    fm_block = parts[0]
     title = _title_from_slug(slug)
     known_targets = list_existing_wiki_targets(wiki_dir)
     known_targets_str = _compiler._format_known_targets(known_targets)
@@ -209,17 +210,6 @@ async def consolidate_page(
             page_dir,
             slug,
             ghosts[:5],
-        )
-
-    sources = fm.get("sources")
-    if isinstance(sources, list):
-        source_targets = [
-            source.removesuffix(".md")
-            for source in sources
-            if isinstance(source, str) and source.startswith("summaries/")
-        ]
-        cleaned = _compiler._with_summary_links(
-            cleaned, [f"[[{target}]]" for target in source_targets if target in known_targets]
         )
 
     if description:

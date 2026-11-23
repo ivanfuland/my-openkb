@@ -15,7 +15,7 @@ from click.testing import CliRunner
 
 from openkb import frontmatter
 from openkb.agent import compiler, consolidator
-from openkb.cli import cli
+from openkb.cli import cli, run_remove_for_api
 from openkb.indexer import CloudImportData
 from openkb.lint import find_broken_links
 from openkb.pending import PendingTopicsStore, pending_topics_path
@@ -189,6 +189,27 @@ def test_malformed_input_is_rejected_before_model_and_other_page_succeeds(kb_dir
     assert skipped.exit_code == 0, skipped.output
     assert "[SKIP] concepts/alpha (no pending notes)." in skipped.output
     assert scripted.consolidation_calls == ["entity", "concept"]
+
+
+@pytest.mark.parametrize("selector", [("alpha",), ("--all", "--min-notes", "0", "--yes")])
+def test_consolidate_skips_pages_without_notes_even_with_invalid_metadata(
+    kb_dir, scripted, selector
+):
+    concept = _topic(kb_dir, "concepts")
+    entity = _topic(kb_dir, "entities")
+    entity.parent.mkdir(exist_ok=True)
+    concept.write_text("Hand-authored concept prose.\n")
+    entity.write_text("---\ntype: [\n---\nEntity prose.\n\n## Notes\n\n")
+    before = concept.read_bytes(), entity.read_bytes()
+
+    result = _invoke(kb_dir, "consolidate", *selector)
+
+    assert result.exit_code == 0, result.output
+    assert "[SKIP] concepts/alpha (no pending notes)." in result.output
+    if selector[0] == "--all":
+        assert "[SKIP] entities/alpha (no pending notes)." in result.output
+    assert scripted.consolidation_calls == []
+    assert (concept.read_bytes(), entity.read_bytes()) == before
 
 
 @pytest.mark.parametrize("bad_description", [{"key": "value"}, ["line"], "one\ntwo"])
@@ -396,7 +417,7 @@ def test_remove_purge_promote_consolidate_lint_round_trip(kb_dir, scripted):
     for kind in ("concept", "entity"):
         scripted.consolidations[kind] = _reply(
             {
-                "description": f"New {kind} brief",
+                "description": f"  New {kind} brief\r\n",
                 "content": "---\ntype: ignored\n---\n\nConsolidated facts.",
             }
         )
@@ -411,10 +432,11 @@ def test_remove_purge_promote_consolidate_lint_round_trip(kb_dir, scripted):
     assert frontmatter.parse_required(topic.read_text())["custom"] == {"keep": True}
     for kind in ("concepts", "entities"):
         text = _topic(kb_dir, kind).read_text()
-        assert "## Notes" not in text
-        assert "Old second line." not in text
-        assert "Consolidated facts." in text
-        assert all(f"[[summaries/{doc}]]" in text for doc in "bcd")
+        assert frontmatter.parse_required(text)["sources"] == [f"summaries/{d}.md" for d in "dcb"]
+        assert frontmatter.split(text)[1].strip() == "Consolidated facts."
+        for doc in "bcd":
+            summary = (wiki / "summaries" / f"{doc}.md").read_text()
+            assert summary.count(f"[[{kind}/alpha]]") == 1
 
     exploration = wiki / "explorations" / "test.md"
     exploration.write_text("[[alpha]] and [[entities/alpha]] and [[missing-page|a ghost]].\n")
@@ -435,13 +457,40 @@ def test_remove_purge_promote_consolidate_lint_round_trip(kb_dir, scripted):
     assert find_broken_links(wiki) == ["Broken link [[summaries/b]] in explorations/test.md"]
 
 
-def test_malformed_pending_store_is_preserved(kb_dir, scripted):
+@pytest.mark.parametrize("via_api", [False, True])
+def test_malformed_pending_store_is_preserved(kb_dir, scripted, via_api, caplog):
     _add(kb_dir, "a")
-    pending_topics_path(kb_dir).write_bytes(b'{"concepts":null}')
+    pending = pending_topics_path(kb_dir)
+    corrupt = b'{"concepts":null}'
+    pending.write_bytes(corrupt)
     before = _state(kb_dir)
     _add(kb_dir, "b", fails=True)
-    assert _invoke(kb_dir, "remove", "a.md", "--yes").exit_code == 1
     assert _state(kb_dir) == before
+
+    if via_api:
+        preview = run_remove_for_api(kb_dir, "a.md", dry_run=True)
+        assert preview["status"] == "dry_run"
+        assert all("pending_topics.json" not in action["target"] for action in preview["actions"])
+    else:
+        preview = _invoke(kb_dir, "remove", "a.md", "--dry-run")
+        assert preview.exit_code == 0, preview.output
+        assert "(dry-run" in preview.output
+        assert "(purge" not in preview.output
+    assert _state(kb_dir) == before
+    warning = "Skipping pending note cleanup"
+    assert warning in caplog.text and pending.name in caplog.text
+
+    caplog.clear()
+    if via_api:
+        assert run_remove_for_api(kb_dir, "a.md")["status"] == "removed"
+    else:
+        result = _invoke(kb_dir, "remove", "a.md", "--yes")
+        assert result.exit_code == 0, result.output
+        assert "[OK] a.md removed" in result.output
+    assert warning in caplog.text and pending.name in caplog.text
+    assert pending.read_bytes() == corrupt
+    assert not (kb_dir / "wiki" / "summaries" / "a.md").exists()
+    assert run_remove_for_api(kb_dir, "a.md")["status"] == "not_found"
 
 
 def test_consolidation_index_failure_rolls_back_page(kb_dir, scripted):

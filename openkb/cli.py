@@ -1436,6 +1436,16 @@ class RemoveResult:
     message: str
 
 
+def _load_pending_topics_for_remove(path: Path) -> PendingTopicsStore | None:
+    try:
+        return PendingTopicsStore(path)
+    except ValueError as exc:
+        logging.getLogger(__name__).warning(
+            "Skipping pending note cleanup for %s because the store is invalid: %s", path, exc
+        )
+        return None
+
+
 def _build_remove_plan(
     kb_dir: Path,
     file_hash: str,
@@ -1501,7 +1511,8 @@ def _build_remove_plan(
         )
 
     pending_path = pending_topics_path(kb_dir)
-    pending_note_count = PendingTopicsStore(pending_path).count_document_notes(doc_name)
+    pending = _load_pending_topics_for_remove(pending_path)
+    pending_note_count = pending.count_document_notes(doc_name) if pending is not None else 0
     if pending_note_count:
         actions.append(
             RemoveAction(
@@ -1632,7 +1643,9 @@ def _apply_remove_plan(
     name = plan.name
 
     if plan.pending_note_count:
-        PendingTopicsStore(pending_topics_path(kb_dir)).remove_document(doc_name)
+        pending = _load_pending_topics_for_remove(pending_topics_path(kb_dir))
+        if pending is not None:
+            pending.remove_document(doc_name)
 
     plan.summary_path.unlink(missing_ok=True)
     plan.source_md.unlink(missing_ok=True)
