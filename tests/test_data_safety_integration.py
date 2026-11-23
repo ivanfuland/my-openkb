@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 import sys
+from os.path import samestat
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -250,9 +251,18 @@ def test_failed_promotion_restores_bytes_and_retry_promotes_once(kb_dir, scripte
     def after_first_page(path, text):
         write(path, text)
         if path == _topic(kb_dir, "concepts"):
-            assert len(frontmatter.parse_required(path.read_text())["sources"]) == 3
-            assert all(f"[[summaries/{doc}]]" in text for doc in ("a", "b", "c"))
-            assert "[[ghost]]" not in text
+            saved = path.read_text()
+            assert frontmatter.parse_required(saved)["sources"] == [
+                f"summaries/{doc}.md" for doc in "cba"
+            ]
+            _, body = frontmatter.split(saved)
+            if mode == "append":
+                for doc in "abc":
+                    assert f"Note from {doc}." in body
+                    assert f"[[summaries/{doc}]]" in body
+            else:
+                assert body.strip() == "Curated topic facts. [[concepts/alpha]]"
+            assert "[[ghost]]" not in body
             raise OSError("fault after first page write")
 
     def after_clear(store, kind, slug):
@@ -273,6 +283,9 @@ def test_failed_promotion_restores_bytes_and_retry_promotes_once(kb_dir, scripte
     index = (kb_dir / "wiki" / "index.md").read_text()
     for kind in ("concepts", "entities"):
         assert index.count(f"[[{kind}/alpha]]") == 1
+        if mode == "rewrite":
+            _, body = frontmatter.split(_topic(kb_dir, kind).read_text())
+            assert all(f"[[summaries/{doc}]]" not in body for doc in "ab")
         for doc in ("a", "b", "c"):
             assert f"[[{kind}/alpha]]" in (kb_dir / "wiki" / "summaries" / f"{doc}.md").read_text()
         assert PendingTopicsStore(pending_topics_path(kb_dir)).get(kind, "alpha") is None
@@ -379,19 +392,31 @@ def test_remove_purge_promote_consolidate_lint_round_trip(kb_dir, scripted):
         assert [note["doc_name"] for note in notes] == ["a", "b"]
         assert notes[0]["note"] == scripted.notes["a"]
         store.add_note(kind, "one-off", "private brief", "a", "summaries/a.md", "Only a.")
+    image = wiki / "sources" / "images" / "a" / "image.png"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(b"extracted image bytes")
+    original_image = image.stat()
     baseline = _state(kb_dir)
     preview = _invoke(kb_dir, "remove", "a.md", "--dry-run")
     assert preview.exit_code == 0, preview.output
     assert "pending_topics.json  (purge 4 note(s))" in preview.output
     assert _state(kb_dir) == baseline
 
-    with patch.object(compiler, "remove_doc_from_index", side_effect=OSError("remove fault")):
+    def fail_after_image_removal(*args, **kwargs):
+        assert not image.exists()
+        staging = kb_dir / ".openkb" / "staging"
+        (backup,) = staging.glob(f"rollback-*/{image.relative_to(kb_dir).as_posix()}")
+        assert samestat(original_image, backup.stat())
+        raise OSError("remove fault")
+
+    with patch.object(compiler, "remove_doc_from_index", side_effect=fail_after_image_removal):
         failed = _invoke(kb_dir, "remove", "a.md", "--yes")
-    assert failed.exit_code == 1
+    assert str(failed.exception) == "remove fault"
     assert _state(kb_dir) == baseline
     removed = _invoke(kb_dir, "remove", "a.md", "--yes")
     assert removed.exit_code == 0, removed.output
     assert "[OK] a.md removed" in removed.output
+    assert not image.parent.exists()
     store = PendingTopicsStore(pending)
     for kind in ("concepts", "entities"):
         assert store.get(kind, "one-off") is None
@@ -458,10 +483,10 @@ def test_remove_purge_promote_consolidate_lint_round_trip(kb_dir, scripted):
 
 
 @pytest.mark.parametrize("via_api", [False, True])
-def test_malformed_pending_store_is_preserved(kb_dir, scripted, via_api, caplog):
+@pytest.mark.parametrize("corrupt", [b'{"concepts":null}', b'{"concepts":'])
+def test_malformed_pending_store_is_preserved(kb_dir, scripted, via_api, corrupt, caplog):
     _add(kb_dir, "a")
     pending = pending_topics_path(kb_dir)
-    corrupt = b'{"concepts":null}'
     pending.write_bytes(corrupt)
     before = _state(kb_dir)
     _add(kb_dir, "b", fails=True)
@@ -490,6 +515,28 @@ def test_malformed_pending_store_is_preserved(kb_dir, scripted, via_api, caplog)
     assert warning in caplog.text and pending.name in caplog.text
     assert pending.read_bytes() == corrupt
     assert not (kb_dir / "wiki" / "summaries" / "a.md").exists()
+    assert run_remove_for_api(kb_dir, "a.md")["status"] == "not_found"
+
+
+def test_remove_skips_pending_store_that_becomes_unreadable(kb_dir, scripted, caplog):
+    _add(kb_dir, "a")
+    pending = pending_topics_path(kb_dir)
+    before = pending.read_bytes()
+    preserved = pending / "pending.bak"
+
+    def replace_store_at_confirmation(*args, **kwargs):
+        pending.unlink()
+        pending.mkdir()
+        preserved.write_bytes(before)
+        return True
+
+    with patch("openkb.cli.click.confirm", side_effect=replace_store_at_confirmation):
+        removed = _invoke(kb_dir, "remove", "a.md")
+    assert removed.exit_code == 0, removed.output
+    assert "(purge 2 note(s))" in removed.output
+    assert "[OK] a.md removed" in removed.output
+    assert "Skipping pending note cleanup" in caplog.text and pending.name in caplog.text
+    assert preserved.read_bytes() == before
     assert run_remove_for_api(kb_dir, "a.md")["status"] == "not_found"
 
 

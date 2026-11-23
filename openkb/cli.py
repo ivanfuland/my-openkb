@@ -1439,10 +1439,8 @@ class RemoveResult:
 def _load_pending_topics_for_remove(path: Path) -> PendingTopicsStore | None:
     try:
         return PendingTopicsStore(path)
-    except ValueError as exc:
-        logging.getLogger(__name__).warning(
-            "Skipping pending note cleanup for %s because the store is invalid: %s", path, exc
-        )
+    except (ValueError, OSError) as exc:
+        logging.getLogger(__name__).warning("Skipping pending note cleanup for %s: %s", path, exc)
         return None
 
 
@@ -1596,12 +1594,20 @@ def _execute_remove_plan(
     ]
     if plan.raw_path is not None:
         paths.append(plan.raw_path)
-    if plan.pending_note_count:
-        paths.append(pending_topics_path(kb_dir))
+    pending_path = pending_topics_path(kb_dir)
+    pending = _load_pending_topics_for_remove(pending_path) if plan.pending_note_count else None
+    if pending is not None:
+        paths.append(pending_path)
     snapshot = snapshot_paths(
-        kb_dir, paths, operation="remove", details={"doc_name": plan.doc_name}
+        kb_dir,
+        paths,
+        operation="remove",
+        details={"doc_name": plan.doc_name},
+        hardlink_dirs={plan.images_dir},
     )
     try:
+        if pending is not None:
+            pending.remove_document(plan.doc_name)
         result = _apply_remove_plan(kb_dir, plan, registry, keep_empty=keep_empty)
         # A PageIndex cleanup error is a supported partial result. The
         # registry entry remains for retry, and completed wiki edits stick.
@@ -1641,11 +1647,6 @@ def _apply_remove_plan(
     openkb_dir = kb_dir / ".openkb"
     doc_name = plan.doc_name
     name = plan.name
-
-    if plan.pending_note_count:
-        pending = _load_pending_topics_for_remove(pending_topics_path(kb_dir))
-        if pending is not None:
-            pending.remove_document(doc_name)
 
     plan.summary_path.unlink(missing_ok=True)
     plan.source_md.unlink(missing_ok=True)
@@ -2274,8 +2275,7 @@ def consolidate(ctx, page_name, all_pages, min_notes, dry_run, yes):
     failed = 0
     for (page_dir, slug, _count), (ok, exc, elapsed) in zip(targets, results):
         if exc is not None:
-            detail = " ".join(str(exc).splitlines())
-            click.echo(f"  [ERROR] Consolidation failed: {detail} ({page_dir}/{slug})")
+            click.echo(f"  [ERROR] Consolidation failed: {exc}")
             logging.getLogger(__name__).debug(
                 "Consolidate traceback for %s/%s:", page_dir, slug, exc_info=exc
             )

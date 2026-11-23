@@ -1892,7 +1892,6 @@ class _Promotion:
 
     def render(self, known_targets: set[str]) -> str:
         sources = [note["source_file"] for note in reversed(self.notes)]
-        doc_names = [note["doc_name"] for note in self.notes]
         if self.rewritten_body is None:
             body = ""
             for note in self.notes:
@@ -1904,7 +1903,6 @@ class _Promotion:
         else:
             body, _ = strip_ghost_wikilinks(self.rewritten_body, known_targets)
             _require_nonempty_content(body, self.target)
-            body = _with_summary_links(body, [f"[[summaries/{doc}]]" for doc in doc_names])
 
         fm_lines = [
             frontmatter.kv_line("type", self.entity_type.title() or "Concept"),

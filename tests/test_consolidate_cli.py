@@ -111,18 +111,19 @@ class TestConsolidateExecution:
         assert result.exit_code == 0, result.output
         assert "Done: consolidated 0, skipped 1, failed 0." in result.output
 
-    def test_exception_in_one_page_reported_as_error_not_fatal(self, kb_dir):
+    @pytest.mark.parametrize("message", ["boom", "boom\nmore details"])
+    def test_exception_in_one_page_reported_as_error_not_fatal(self, kb_dir, message):
         _seed_page_with_notes(kb_dir, slug="approval-workflows")
         _seed_page_with_notes(kb_dir, slug="second-page")
         with patch(
             "openkb.agent.consolidator.consolidate_page",
             new_callable=AsyncMock,
-            side_effect=[ValueError("boom"), True],
+            side_effect=[ValueError(message), True],
         ):
             result = _invoke(kb_dir, ["consolidate", "--all", "--yes"])
 
         assert result.exit_code == 1, result.output
-        assert "[ERROR] Consolidation failed: boom (concepts/approval-workflows)" in result.output
+        assert f"\n  [ERROR] Consolidation failed: {message}\n" in result.output
         assert "Done: consolidated 1, skipped 0, failed 1." in result.output
 
 
