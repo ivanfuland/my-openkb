@@ -20,7 +20,7 @@ from pathlib import Path
 
 from openkb import frontmatter
 from openkb.locks import atomic_write_text
-from openkb.markdown import unfenced_line_ranges
+from openkb.markdown import closing_fence_for_append, unfenced_line_ranges
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +168,10 @@ def _upsert_note_line(
     lines = remove_doc_notes(body, doc_name, heading).split("\n")
     first_span = next(_notes_spans(lines, heading), None)
     if first_span is None:
+        if closing_fence := closing_fence_for_append(lines):
+            if lines[-1] == "":
+                lines.pop()  # Replace the empty split element after the final newline.
+            lines.append(closing_fence)
         while lines and lines[-1].strip() == "":
             lines.pop()
         if lines:
