@@ -1128,6 +1128,12 @@ def add(ctx, path, from_pageindex_cloud):
     the contributing document summaries, including earlier ones. If the
     model truncates a short document's summary rewrite, OpenKB uses the
     initial summary.
+
+    OpenKB retries concept and entity generation once when a completed model
+    response yields an empty page body or note. If both attempts are empty,
+    OpenKB skips that topic with a warning. In the concept and entity ``[WARN]``
+    summaries, ``planned but only N written`` counts direct results, staged
+    notes, and topics promoted to pages.
     """
     kb_dir = _find_kb_dir(ctx.obj.get("kb_dir_override"))
     if kb_dir is None:
@@ -1823,7 +1829,9 @@ def remove(ctx, identifier, keep_raw, keep_empty, dry_run, yes):
 
     Deletes the doc's summary and source files, removes its citations from
     concept and entity pages, and cleans up the index and hash entry.
-    Wikilink repair is limited to modified topic pages and the index.
+    On retained topic pages, this removes the document's entries under
+    ``## Notes``, including legacy multiline entries. Wikilink repair is
+    limited to modified topic pages and the index.
     Concept and entity pages whose only source was this doc are deleted by
     default. Use --keep-empty to retain them.
 
@@ -2009,8 +2017,10 @@ def recompile(ctx, doc_name, all_docs, dry_run, yes, refresh_schema):
     Exactly one of DOC_NAME or ``--all`` is required.
 
     Recompiling regenerates short-document summaries. Existing concept and
-    entity pages follow ``concept_update_mode``. By default (``append``),
-    OpenKB records source-linked notes for these updates. In ``rewrite``
+    entity pages follow ``concept_update_mode``. In the default ``append``
+    mode, each updated topic page gets a single-line, source-linked entry
+    under ``## Notes`` for the recompiled document. This replaces any previous
+    entries for that document, including legacy multiline notes. In ``rewrite``
     mode the LLM rewrites the page body and can overwrite manual edits.
     """
     from openkb.state import HashRegistry
@@ -2205,8 +2215,9 @@ def consolidate(ctx, page_name, all_pages, min_notes, dry_run, yes):
     concept or entity slug first, then a unique substring. ``--all`` selects
     pages with at least ``--min-notes`` notes and processes them concurrently
     using the KB's ``concurrency`` setting. Preview the selection with
-    ``--dry-run``. ``--all`` prompts for confirmation when multiple pages are
-    selected, unless you pass ``--yes``.
+    ``--dry-run``. The count treats a legacy multiline note as one entry and
+    skips fenced and indented code examples. ``--all`` prompts for confirmation
+    when multiple pages are selected, unless you pass ``--yes``.
 
     Consolidation replaces the entire Markdown body, including existing prose
     and manual edits. OpenKB requires a valid YAML mapping in the frontmatter
@@ -2755,7 +2766,9 @@ def lint(ctx, fix):
     """Lint the knowledge base for structural and semantic inconsistencies.
 
     With --fix, links accepted by the broken-link check are preserved,
-    including links to an existing wiki page by filename stem alone.
+    including links to an existing wiki page by filename stem alone. Repair
+    skips fenced and indented code blocks. The report can still list
+    unresolved targets inside those blocks.
     """
     kb_dir = _find_kb_dir(ctx.obj.get("kb_dir_override"))
     if kb_dir is None:

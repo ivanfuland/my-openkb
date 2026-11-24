@@ -15,14 +15,19 @@ import datetime
 import json
 import logging
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 from openkb import frontmatter
 from openkb.locks import atomic_write_text
+from openkb.markdown import closing_fence_for_append, non_code_line_ranges
 
 logger = logging.getLogger(__name__)
 
 _NOTES_HEADING = "## Notes"
+_NOTE_BULLET = "- **"
+_ATX_HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
+_NOTE_SOURCE_SUFFIX = re.compile(r"\(\[\[summaries/([^\]]+)\]\]\)[ \t]*$")
 
 # ---------------------------------------------------------------------------
 # Prompt templates — deliberately slim: no existing page content, no wikilink
@@ -109,27 +114,64 @@ def note_fields(raw: str) -> tuple[str, str]:
     )
 
 
+def _notes_spans(lines: list[str], heading: str = _NOTES_HEADING) -> Iterator[tuple[int, int, int]]:
+    """Yield (span start, content start, exclusive end) for Notes lines outside code."""
+    in_notes = False
+    for start, end in non_code_line_ranges(lines):
+        content_start = start
+        for i in range(start, end):
+            line = lines[i]
+            is_notes_heading = line.strip() == heading
+            if is_notes_heading or _ATX_HEADING.match(line.rstrip("\r\n")):
+                if in_notes and start < i:
+                    yield start, content_start, i
+                in_notes = is_notes_heading
+                start, content_start = i, i + 1
+        if in_notes:
+            yield start, content_start, end
+
+
+def remove_doc_notes(body: str, doc_name: str, heading: str = _NOTES_HEADING) -> str:
+    """Remove this source's dated bullets and their legacy continuation lines."""
+    lines = body.splitlines(keepends=True)
+    kept: list[str] = []
+    kept_from = 0
+    for _, start, end in _notes_spans(lines, heading):
+        note_start = None
+        for i in range(start, end):
+            line = lines[i]
+            if line.lstrip().startswith(_NOTE_BULLET):
+                note_start = i
+            if note_start is None:
+                continue
+            marker = _NOTE_SOURCE_SUFFIX.search(line.rstrip("\r\n"))
+            if marker is None:
+                continue
+            if marker[1] == doc_name:
+                kept.extend(lines[kept_from:note_start])
+                kept_from = i + 1
+            # A source suffix closes the bullet, even for a different doc.
+            note_start = None
+    kept.extend(lines[kept_from:])
+    return "".join(kept)
+
+
 def _upsert_note_line(
     body: str, doc_name: str, note: str, heading: str = _NOTES_HEADING, *, date: str | None = None
 ) -> str:
-    """Insert/replace the note line for ``doc_name`` right after ``heading``.
-
-    Keyed by the ``[[summaries/{doc_name}]]`` source marker (not the note
-    text), so re-ingesting an updated version of the same document replaces
-    its own line instead of accumulating duplicates. New/replaced lines land
-    directly after the heading — newest first, matching the ``sources:``
-    frontmatter convention.
-    """
+    """Replace the source's notes with one single-line entry, newest first."""
     marker = f"[[summaries/{doc_name}]]"
     date = date or datetime.date.today().isoformat()
+    note = " ".join(part for line in note.splitlines() if (part := line.strip()))
     line = f"- **{date}** {note} ({marker})"
 
-    lines = body.split("\n")
-    line_re = re.compile(rf"^- \*\*.*\({re.escape(marker)}\)\s*$")
-    lines = [ln for ln in lines if not line_re.match(ln)]
-
-    heading_idx = next((i for i, ln in enumerate(lines) if ln.strip() == heading), None)
-    if heading_idx is None:
+    lines = remove_doc_notes(body, doc_name, heading).split("\n")
+    first_span = next(_notes_spans(lines, heading), None)
+    if first_span is None:
+        if closing_fence := closing_fence_for_append(lines):
+            if lines[-1] == "":
+                lines.pop()  # Replace the empty split element after the final newline.
+            lines.append(closing_fence)
         while lines and lines[-1].strip() == "":
             lines.pop()
         if lines:
@@ -138,7 +180,7 @@ def _upsert_note_line(
         lines.append("")
         lines.append(line)
     else:
-        insert_at = heading_idx + 1
+        _, insert_at, _ = first_span
         if insert_at < len(lines) and lines[insert_at].strip() == "":
             insert_at += 1
         lines.insert(insert_at, line)

@@ -1620,8 +1620,7 @@ def _remove_doc_from_pages(
       ``## Related Documents`` section.
     - Remove any standalone ``See also: [[summaries/{doc_name}]]`` lines
       (left by ``_add_related_link``).
-    - Remove this doc's ``## Notes`` line, if any (left by
-      ``concept_update_mode="append"``; a no-op for "rewrite"-mode pages).
+    - Remove this doc's ``## Notes`` entries (left by ``concept_update_mode="append"``).
     - If the ``sources:`` list becomes empty AND ``keep_empty`` is False,
       delete the page entirely.
 
@@ -1669,16 +1668,9 @@ def _remove_doc_from_pages(
             flags=re.MULTILINE,
         )
 
-        # Drop this doc's "## Notes" line (left by
-        # ``compiler_notes.append_concept_note``/``append_entity_note`` under
-        # ``concept_update_mode="append"``) — a no-op on "rewrite"-mode pages,
-        # which never contain this line shape.
-        new_text = re.sub(
-            rf"^- \*\*.*\(\[\[{re.escape(bare_source)}\]\]\)[ \t]*\n?",
-            "",
-            new_text,
-            flags=re.MULTILINE,
-        )
+        parts = frontmatter.split(new_text)
+        fm_block, body = parts if parts is not None else ("", new_text)
+        new_text = fm_block + compiler_notes.remove_doc_notes(body, doc_name)
 
         if sources_empty and not keep_empty:
             path.unlink()
@@ -2240,33 +2232,50 @@ async def _compile_concepts(
     # --- Step 3: Generate/update concept pages concurrently (A cached) ---
     semaphore = asyncio.Semaphore(max_concurrency)
 
+    async def _generate_topic(
+        name: str, step: str, prompt: str, *, note: bool = False
+    ) -> tuple[str, str, dict | None]:
+        """Retry a completed response once if its parsed topic content is empty."""
+        messages = [system_msg, doc_msg, summary_msg]  # cached (BP1, BP2)
+        if not note:
+            messages.append(known_targets_msg)  # cached (BP3) — whitelist
+        messages.append({"role": "user", "content": prompt})
+
+        retry = True
+        while True:
+            async with semaphore:
+                raw = await _llm_call_page_async(
+                    model,
+                    messages,
+                    f"{step}: {name}",
+                    response_format=_JSON_RESPONSE_FORMAT,
+                    bundle=bundle,
+                )
+            if note:
+                brief, content = compiler_notes.note_fields(raw)
+                obj = None
+            else:
+                brief, content, obj = _page_fields(raw)
+                content = frontmatter.strip_model_frontmatter(content)
+            try:
+                _require_nonempty_content(content, name)
+            except ValueError:
+                if not retry:
+                    raise
+                retry = False
+            else:
+                return brief, content, obj
+
     async def _gen_create(concept: dict, extra_context: str = "") -> tuple[str, str, bool, str]:
         name = concept["name"]
         title = concept.get("title", name)
-        async with semaphore:
-            raw = await _llm_call_page_async(
-                model,
-                [
-                    system_msg,
-                    doc_msg,  # cached (BP1)
-                    summary_msg,  # cached (BP2)
-                    known_targets_msg,  # cached (BP3) — whitelist
-                    {
-                        "role": "user",
-                        "content": _CONCEPT_PAGE_USER.format(
-                            title=title,
-                            doc_name=doc_name,
-                            update_instruction=extra_context,
-                        ),
-                    },
-                ],
-                f"concept: {name}",
-                response_format=_JSON_RESPONSE_FORMAT,
-                bundle=bundle,
-            )
-        brief, content, _ = _page_fields(raw)
-        content = frontmatter.strip_model_frontmatter(content)
-        _require_nonempty_content(content, name)
+        brief, content, _ = await _generate_topic(
+            name,
+            "concept",
+            _CONCEPT_PAGE_USER.format(
+                title=title, doc_name=doc_name, update_instruction=extra_context
+            ),
+        )
         return name, content, False, brief
 
     async def _gen_update(concept: dict) -> tuple[str, str, bool, str]:
@@ -2279,62 +2288,27 @@ async def _compile_concepts(
             existing_content = ex_parts[1].strip() if ex_parts is not None else raw_text
         else:
             existing_content = "(page not found — create from scratch)"
-        async with semaphore:
-            raw = await _llm_call_page_async(
-                model,
-                [
-                    system_msg,
-                    doc_msg,  # cached (BP1)
-                    summary_msg,  # cached (BP2)
-                    known_targets_msg,  # cached (BP3) — whitelist
-                    {
-                        "role": "user",
-                        "content": _CONCEPT_UPDATE_USER.format(
-                            title=title,
-                            doc_name=doc_name,
-                            existing_content=existing_content,
-                        ),
-                    },
-                ],
-                f"update: {name}",
-                response_format=_JSON_RESPONSE_FORMAT,
-                bundle=bundle,
-            )
-        brief, content, _ = _page_fields(raw)
-        content = frontmatter.strip_model_frontmatter(content)
-        _require_nonempty_content(content, name)
+        brief, content, _ = await _generate_topic(
+            name,
+            "update",
+            _CONCEPT_UPDATE_USER.format(
+                title=title, doc_name=doc_name, existing_content=existing_content
+            ),
+        )
         return name, content, True, brief
 
     async def _gen_entity_create(ent: dict, extra_context: str = "") -> tuple[str, str, str, str]:
         name = ent["name"]
         title = ent.get("title", name)
         etype = ent.get("type", "other")
-        async with semaphore:
-            raw = await _llm_call_page_async(
-                model,
-                [
-                    system_msg,
-                    doc_msg,  # cached (BP1)
-                    summary_msg,  # cached (BP2)
-                    known_targets_msg,  # cached (BP3) — whitelist
-                    {
-                        "role": "user",
-                        "content": _ENTITY_PAGE_USER.format(
-                            title=title,
-                            type=etype,
-                            doc_name=doc_name,
-                            update_instruction=extra_context,
-                        ).replace("__ENTITY_TYPES__", types_str),
-                    },
-                ],
-                f"entity: {name}",
-                response_format=_JSON_RESPONSE_FORMAT,
-                bundle=bundle,
-            )
-        brief, content, obj = _page_fields(raw)
+        brief, content, obj = await _generate_topic(
+            name,
+            "entity",
+            _ENTITY_PAGE_USER.format(
+                title=title, type=etype, doc_name=doc_name, update_instruction=extra_context
+            ).replace("__ENTITY_TYPES__", types_str),
+        )
         etype_out = obj.get("type") if obj and obj.get("type") in valid_types else etype
-        content = frontmatter.strip_model_frontmatter(content)
-        _require_nonempty_content(content, name)
         return name, content, brief, etype_out
 
     async def _gen_entity_update(ent: dict) -> tuple[str, str, str, str]:
@@ -2348,32 +2322,14 @@ async def _compile_concepts(
             existing_content = ex_parts[1].strip() if ex_parts is not None else raw_text
         else:
             existing_content = "(page not found — create from scratch)"
-        async with semaphore:
-            raw = await _llm_call_page_async(
-                model,
-                [
-                    system_msg,
-                    doc_msg,  # cached (BP1)
-                    summary_msg,  # cached (BP2)
-                    known_targets_msg,  # cached (BP3) — whitelist
-                    {
-                        "role": "user",
-                        "content": _ENTITY_UPDATE_USER.format(
-                            title=title,
-                            type=etype,
-                            doc_name=doc_name,
-                            existing_content=existing_content,
-                        ).replace("__ENTITY_TYPES__", types_str),
-                    },
-                ],
-                f"entity-update: {name}",
-                response_format=_JSON_RESPONSE_FORMAT,
-                bundle=bundle,
-            )
-        brief, content, obj = _page_fields(raw)
+        brief, content, obj = await _generate_topic(
+            name,
+            "entity-update",
+            _ENTITY_UPDATE_USER.format(
+                title=title, type=etype, doc_name=doc_name, existing_content=existing_content
+            ).replace("__ENTITY_TYPES__", types_str),
+        )
         etype_out = obj.get("type") if obj and obj.get("type") in valid_types else etype
-        content = frontmatter.strip_model_frontmatter(content)
-        _require_nonempty_content(content, name)
         return name, content, brief, etype_out
 
     # --- "append" mode closures: a short note instead of a full-page rewrite.
@@ -2386,111 +2342,53 @@ async def _compile_concepts(
     async def _gen_note_create(concept: dict) -> tuple[str, str, bool, str]:
         name = concept["name"]
         title = concept.get("title", name)
-        async with semaphore:
-            raw = await _llm_call_page_async(
-                model,
-                [
-                    system_msg,
-                    doc_msg,  # cached (BP1)
-                    summary_msg,  # cached (BP2)
-                    {
-                        "role": "user",
-                        "content": compiler_notes._CONCEPT_NOTE_CREATE_USER.format(
-                            title=title,
-                            doc_name=doc_name,
-                            extra_context="",
-                        ),
-                    },
-                ],
-                f"concept-note: {name}",
-                response_format=_JSON_RESPONSE_FORMAT,
-                bundle=bundle,
-            )
-        description, note = compiler_notes.note_fields(raw)
-        _require_nonempty_content(note, name)
+        description, note, _ = await _generate_topic(
+            name,
+            "concept-note",
+            compiler_notes._CONCEPT_NOTE_CREATE_USER.format(
+                title=title, doc_name=doc_name, extra_context=""
+            ),
+            note=True,
+        )
         return name, note, False, description
 
     async def _gen_note_update(concept: dict) -> tuple[str, str, bool, str]:
         name = concept["name"]
         title = concept.get("title", name)
-        async with semaphore:
-            raw = await _llm_call_page_async(
-                model,
-                [
-                    system_msg,
-                    doc_msg,  # cached (BP1)
-                    summary_msg,  # cached (BP2)
-                    {
-                        "role": "user",
-                        "content": compiler_notes._CONCEPT_NOTE_UPDATE_USER.format(
-                            title=title,
-                            doc_name=doc_name,
-                        ),
-                    },
-                ],
-                f"concept-note-update: {name}",
-                response_format=_JSON_RESPONSE_FORMAT,
-                bundle=bundle,
-            )
-        _, note = compiler_notes.note_fields(raw)
-        _require_nonempty_content(note, name)
+        _, note, _ = await _generate_topic(
+            name,
+            "concept-note-update",
+            compiler_notes._CONCEPT_NOTE_UPDATE_USER.format(title=title, doc_name=doc_name),
+            note=True,
+        )
         return name, note, True, ""
 
     async def _gen_entity_note_create(ent: dict) -> tuple[str, str, str, str]:
         name = ent["name"]
         title = ent.get("title", name)
         etype = ent.get("type", "other")
-        async with semaphore:
-            raw = await _llm_call_page_async(
-                model,
-                [
-                    system_msg,
-                    doc_msg,  # cached (BP1)
-                    summary_msg,  # cached (BP2)
-                    {
-                        "role": "user",
-                        "content": compiler_notes._ENTITY_NOTE_CREATE_USER.format(
-                            title=title,
-                            type=etype,
-                            doc_name=doc_name,
-                            extra_context="",
-                        ),
-                    },
-                ],
-                f"entity-note: {name}",
-                response_format=_JSON_RESPONSE_FORMAT,
-                bundle=bundle,
-            )
-        description, note = compiler_notes.note_fields(raw)
-        _require_nonempty_content(note, name)
+        description, note, _ = await _generate_topic(
+            name,
+            "entity-note",
+            compiler_notes._ENTITY_NOTE_CREATE_USER.format(
+                title=title, type=etype, doc_name=doc_name, extra_context=""
+            ),
+            note=True,
+        )
         return name, note, description, etype
 
     async def _gen_entity_note_update(ent: dict) -> tuple[str, str, str, str]:
         name = ent["name"]
         title = ent.get("title", name)
         etype = ent.get("type", "other")
-        async with semaphore:
-            raw = await _llm_call_page_async(
-                model,
-                [
-                    system_msg,
-                    doc_msg,  # cached (BP1)
-                    summary_msg,  # cached (BP2)
-                    {
-                        "role": "user",
-                        "content": compiler_notes._ENTITY_NOTE_UPDATE_USER.format(
-                            title=title,
-                            type=etype,
-                            doc_name=doc_name,
-                        ),
-                    },
-                ],
-                f"entity-note-update: {name}",
-                response_format=_JSON_RESPONSE_FORMAT,
-                bundle=bundle,
-            )
-        _, note = compiler_notes.note_fields(raw)
-        _require_nonempty_content(note, name)
+        _, note, _ = await _generate_topic(
+            name,
+            "entity-note-update",
+            compiler_notes._ENTITY_NOTE_UPDATE_USER.format(
+                title=title, type=etype, doc_name=doc_name
+            ),
+            note=True,
+        )
         return name, note, "", etype
 
     async def _gen_pending_concept(concept: dict) -> _Promotion | None:
@@ -2500,26 +2398,14 @@ async def _compile_concepts(
         slug = _sanitize_concept_name(name)
         prior_notes = pending_store.notes("concepts", slug, excluding_doc=doc_name)
         note_extra_context = _prior_notes_context(prior_notes)
-        async with semaphore:
-            raw = await _llm_call_page_async(
-                model,
-                [
-                    system_msg,
-                    doc_msg,  # cached (BP1)
-                    summary_msg,  # cached (BP2)
-                    {
-                        "role": "user",
-                        "content": compiler_notes._CONCEPT_NOTE_CREATE_USER.format(
-                            title=title, doc_name=doc_name, extra_context=note_extra_context
-                        ),
-                    },
-                ],
-                f"concept-note: {name}",
-                response_format=_JSON_RESPONSE_FORMAT,
-                bundle=bundle,
-            )
-        brief, note = compiler_notes.note_fields(raw)
-        _require_nonempty_content(note, name)
+        brief, note, _ = await _generate_topic(
+            name,
+            "concept-note",
+            compiler_notes._CONCEPT_NOTE_CREATE_USER.format(
+                title=title, doc_name=doc_name, extra_context=note_extra_context
+            ),
+            note=True,
+        )
         new_count = pending_store.add_note("concepts", slug, brief, doc_name, source_file, note)
         if new_count <= MAX_NOTES_BEFORE_PROMOTION:
             return  # still buffering — no page yet
@@ -2540,29 +2426,14 @@ async def _compile_concepts(
         slug = _sanitize_concept_name(name)
         prior_notes = pending_store.notes("entities", slug, excluding_doc=doc_name)
         note_extra_context = _prior_notes_context(prior_notes)
-        async with semaphore:
-            raw = await _llm_call_page_async(
-                model,
-                [
-                    system_msg,
-                    doc_msg,  # cached (BP1)
-                    summary_msg,  # cached (BP2)
-                    {
-                        "role": "user",
-                        "content": compiler_notes._ENTITY_NOTE_CREATE_USER.format(
-                            title=title,
-                            type=etype,
-                            doc_name=doc_name,
-                            extra_context=note_extra_context,
-                        ),
-                    },
-                ],
-                f"entity-note: {name}",
-                response_format=_JSON_RESPONSE_FORMAT,
-                bundle=bundle,
-            )
-        brief, note = compiler_notes.note_fields(raw)
-        _require_nonempty_content(note, name)
+        brief, note, _ = await _generate_topic(
+            name,
+            "entity-note",
+            compiler_notes._ENTITY_NOTE_CREATE_USER.format(
+                title=title, type=etype, doc_name=doc_name, extra_context=note_extra_context
+            ),
+            note=True,
+        )
         new_count = pending_store.add_note(
             "entities", slug, brief, doc_name, source_file, note, type_=etype
         )
@@ -2660,13 +2531,16 @@ async def _compile_concepts(
             if brief:
                 concept_briefs_map[safe_name] = brief
 
-        # Include exception type names inline so the stdout line is
-        # self-contained — per-failure WARNINGs go to stderr.
+        # Downstream callers parse the fixed "planned but only N written" wording.
+        # Include exception types inline because per-failure warnings go to stderr.
         written = len(pending_writes)
-        if written + self_handled < total:
+        handled = written + self_handled
+        if handled < total:
             reason = ", ".join(sorted(set(failure_types))) if failure_types else "see log (stderr)"
+            if self_handled:
+                reason = f"{written} direct, {self_handled} staged/promoted; {reason}"
             sys.stdout.write(
-                f"    [WARN] {total} concept(s) planned but only {written} written "
+                f"    [WARN] {total} concept(s) planned but only {handled} written "
                 f"for {doc_name} ({reason}).\n"
             )
             sys.stdout.flush()
@@ -2694,14 +2568,17 @@ async def _compile_concepts(
             entity_pending.append((name, page_content, brief, etype))
 
         ewritten = len(entity_pending)
-        if ewritten + entity_self_handled < etotal:
+        ehandled = ewritten + entity_self_handled
+        if ehandled < etotal:
             reason = (
                 ", ".join(sorted(set(entity_failure_types)))
                 if entity_failure_types
                 else "see log (stderr)"
             )
+            if entity_self_handled:
+                reason = f"{ewritten} direct, {entity_self_handled} staged/promoted; {reason}"
             sys.stdout.write(
-                f"    [WARN] {etotal} entity(ies) planned but only {ewritten} written "
+                f"    [WARN] {etotal} entity(ies) planned but only {ehandled} written "
                 f"for {doc_name} ({reason}).\n"
             )
             sys.stdout.flush()

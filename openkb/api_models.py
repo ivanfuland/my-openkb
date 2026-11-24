@@ -346,8 +346,7 @@ class PageEditRequest(BaseModel):
 class PageEditResponse(BaseModel):
     status: str
     target: str
-    # Dead [[links]] the edit introduced, demoted to plain text on save (so the
-    # UI can tell the user which links didn't resolve).
+    # Targets demoted to plain text by strip_ghost_wikilinks on save.
     ghosts_stripped: list[str] = []
     content: str | None = None  # the saved full page (frontmatter + body)
 

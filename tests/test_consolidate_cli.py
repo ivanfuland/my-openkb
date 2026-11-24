@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from textwrap import indent
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -54,6 +55,29 @@ class TestConsolidateDryRun:
         assert "approval-workflows" in result.output
         assert "1 note" in result.output
         assert path.read_text(encoding="utf-8") == before
+
+    def test_preview_ignores_indented_notes_examples(self, kb_dir):
+        example = "## Notes\n\n- **Literal** Example.\nContinuation. ([[summaries/a]])\n"
+        notes = (
+            "## Notes\n\n- **2026-01-01** A note. ([[summaries/a]])\n"
+            "- **2026-01-02** Another note. ([[summaries/b]])\n"
+            "- **2026-01-03** Last note. ([[summaries/c]])\n"
+        )
+        for page_dir, indentation in (("concepts", "    "), ("entities", "\t")):
+            directory = kb_dir / "wiki" / page_dir
+            directory.mkdir(exist_ok=True)
+            (directory / "topic.md").write_text(
+                f"# Topic\n\n{indent(example, indentation)}\n{notes}", encoding="utf-8"
+            )
+
+        args = ["consolidate", "--all", "--dry-run", "--min-notes"]
+        preview = _invoke(kb_dir, [*args, "3"])
+        assert preview.exit_code == 0, preview.output
+        assert "concepts/topic  (3 note(s))" in preview.output
+        assert "entities/topic  (3 note(s))" in preview.output
+        excluded = _invoke(kb_dir, [*args, "4"])
+        assert excluded.exit_code == 0, excluded.output
+        assert "No pages with pending notes found." in excluded.output
 
     def test_min_notes_filters_dry_run_candidates(self, kb_dir):
         _seed_page_with_notes(kb_dir)

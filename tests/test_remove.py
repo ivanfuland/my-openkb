@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from openkb.agent.compiler import (
@@ -520,7 +521,9 @@ def test_cli_remove_rolls_back_pages_that_reference_doc_only_in_body(kb_dir):
         encoding="utf-8",
     )
     entity.write_text(
-        "## Notes\n- **2026-01-01** Quoted note. ([[summaries/attention-h_a]])\n\n"
+        "## Notes\n- **2026-01-01** Quoted note. ([[summaries/attention-h_a]])\n"
+        "- **2026-01-02** Legacy note.\n\nAnother paragraph.\n"
+        "([[summaries/attention-h_a]])\n\n"
         "A [[missing-page|reference]].\n",
         encoding="utf-8",
     )
@@ -544,6 +547,44 @@ def test_cli_remove_rolls_back_pages_that_reference_doc_only_in_body(kb_dir):
     assert str(result.exception) == "remove log failure"
     assert {path: path.read_bytes() for path in originals} == originals
     assert hashes.read_bytes() == original_hashes
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        "```markdown\n## Notes\n\n- **2026-01-01** Literal example.\n"
+        "Literal continuation.\n([[summaries/attention-h_a]])\n```\n\n",
+        "    ## Notes\n\n    - **2026-01-01** Literal example.\n"
+        "    Literal continuation.\n    ([[summaries/attention-h_a]])\n\n",
+    ],
+    ids=["fenced-example", "indented-example"],
+)
+def test_cli_remove_preserves_notes_examples(kb_dir, example):
+    _seed_two_doc_kb(kb_dir)
+    wiki = kb_dir / "wiki"
+    body_prefix = f"# Topic\n\n{example}## Notes\n\n"
+    inline_example = "~~~markdown\n- **Example** ([[summaries/attention-h_a]])\n~~~\n\n"
+    kept_note = "- **2026-01-03** Sibling note. ([[summaries/llm-h_l]])\n"
+    reference = "\n## References\n\nSee [[summaries/attention-h_a|the paper]].\n"
+    paths = [wiki / section / "topic.md" for section in ("concepts", "entities")]
+    for path in paths:
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(
+            '---\nsources: ["summaries/attention-h_a.md", "summaries/llm-h_l.md"]\n---\n\n'
+            f"{body_prefix}"
+            "- **2026-01-02** Real note.\nReal continuation.\n([[summaries/attention-h_a]])\n"
+            f"{inline_example}"
+            "- **2026-01-04** Another real note. ([[summaries/attention-h_a]])\n"
+            f"{kept_note}{reference}",
+            encoding="utf-8",
+        )
+
+    result = _invoke(kb_dir, ["remove", "attention.pdf", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    expected_body = body_prefix + inline_example + kept_note + "\n## References\n\nSee the paper.\n"
+    for path in paths:
+        assert path.read_text(encoding="utf-8").endswith(expected_body)
 
 
 def test_cli_remove_keep_raw_preserves_file(kb_dir):
