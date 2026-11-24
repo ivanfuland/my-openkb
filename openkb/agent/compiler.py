@@ -2531,8 +2531,8 @@ async def _compile_concepts(
             if brief:
                 concept_briefs_map[safe_name] = brief
 
-        # Include exception type names inline so the stdout line is
-        # self-contained — per-failure WARNINGs go to stderr.
+        # Downstream callers parse the fixed "planned but only N written" wording.
+        # Include exception types inline because per-failure warnings go to stderr.
         written = len(pending_writes)
         handled = written + self_handled
         if handled < total:

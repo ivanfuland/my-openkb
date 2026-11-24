@@ -104,8 +104,8 @@ def count_pending_notes(text: str) -> int:
 def find_consolidation_candidates(wiki_dir: Path, min_notes: int = 1) -> list[tuple[str, str, int]]:
     """Return ``(page_dir, slug, note_count)`` for pages with pending notes.
 
-    ``page_dir`` is ``"concepts"`` or ``"entities"``. Only pages with at least
-    ``min_notes`` pending note lines are included.
+    ``page_dir`` is ``"concepts"`` or ``"entities"``. ``min_notes`` uses the
+    same entry count as the preview (see :func:`count_pending_notes`).
     """
     candidates: list[tuple[str, str, int]] = []
     for page_dir in ("concepts", "entities"):
