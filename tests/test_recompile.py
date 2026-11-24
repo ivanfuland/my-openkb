@@ -103,6 +103,111 @@ def test_recompile_short_dispatches_compile_short_doc(kb_dir):
     assert "recompiled 1" in result.output
 
 
+@pytest.mark.parametrize(
+    "example",
+    [
+        "",
+        "```markdown\n## Notes\n\n- **2026-01-04** Literal example.\n"
+        "Literal continuation.\n([[summaries/notes-h_s]])\n```\n\n",
+        "    ## Notes\n\n    - **2026-01-04** Literal example.\n"
+        "    Literal continuation.\n    ([[summaries/notes-h_s]])\n\n",
+    ],
+    ids=["ordinary", "fenced-example", "indented-example"],
+)
+def test_recompile_replaces_both_note_formats_on_concept_and_entity_pages(
+    kb_dir, monkeypatch, example
+):
+    _seed_short(kb_dir)
+    notes_prefix = f"# Topic\n\n{example}## Notes\n\n"
+    topic_paths = []
+    for page_dir in ("concepts", "entities"):
+        topic = kb_dir / "wiki" / page_dir / "topic.md"
+        topic.parent.mkdir(exist_ok=True)
+        topic.write_text(
+            '---\nsources: ["summaries/notes-h_s.md", "summaries/other.md"]\n---\n\n'
+            f"{notes_prefix}"
+            "- **2026-01-01** Legacy first line.\n\nLegacy continuation.\n"
+            "([[summaries/notes-h_s]])\n"
+            "- **2026-01-02** Old single line. ([[summaries/notes-h_s]])\n"
+            "- **2026-01-03** Sibling note. ([[summaries/other]])\n\n"
+            "## Examples\n\nPreserve this section.\n",
+            encoding="utf-8",
+        )
+        topic_paths.append(topic)
+    plan = {group: {"update": [{"name": "topic"}]} for group in ("concepts", "entities")}
+    monkeypatch.setattr(
+        compiler,
+        "_llm_call",
+        lambda _model, _messages, step, **_: json.dumps(
+            plan if step == "concepts-plan" else {"content": "Summary."}
+        ),
+    )
+    generate_note = AsyncMock(return_value=json.dumps({"note": "New first line.\nSecond line."}))
+    monkeypatch.setattr(compiler, "_llm_call_page_async", generate_note)
+
+    result = _invoke(kb_dir, ["recompile", "notes.md"])
+
+    assert result.exit_code == 0, result.output
+    assert "recompiled 1" in result.output
+    assert generate_note.await_count == 2
+    for topic in topic_paths:
+        text = topic.read_text(encoding="utf-8")
+        assert notes_prefix in text
+        notes = text.split(notes_prefix, 1)[1]
+        assert notes.count("([[summaries/notes-h_s]])") == 1
+        assert "New first line. Second line. ([[summaries/notes-h_s]])\n" in notes
+        assert "Legacy" not in notes
+        assert "Old single line." not in notes
+        assert notes.endswith(
+            "- **2026-01-03** Sibling note. ([[summaries/other]])\n\n"
+            "## Examples\n\nPreserve this section.\n"
+        )
+
+
+@pytest.mark.parametrize("fence", ["````", "~~~"])
+@pytest.mark.parametrize("closed", [False, True], ids=["open-fence", "closed-fence"])
+def test_recompile_publishes_notes_after_eof_fence(kb_dir, monkeypatch, fence, closed):
+    _seed_short(kb_dir)
+    example = (
+        f"# Topic\n\n{fence}markdown\n## Notes\n\n{fence[:-1]}\n"
+        "- **Literal** Example only. ([[summaries/notes-h_s]])\n\n"
+    )
+    closed_example = f"{example}{fence}"
+    topics = []
+    for page_dir in ("concepts", "entities"):
+        topic = kb_dir / "wiki" / page_dir / "topic.md"
+        topic.parent.mkdir(exist_ok=True)
+        topic.write_text(
+            '---\nsources: ["summaries/notes-h_s.md"]\n---\n\n'
+            + (closed_example if closed else example),
+            encoding="utf-8",
+        )
+        topics.append(topic)
+    plan = {group: {"update": [{"name": "topic"}]} for group in ("concepts", "entities")}
+    monkeypatch.setattr(
+        compiler,
+        "_llm_call",
+        lambda _model, _messages, step, **_: json.dumps(
+            plan if step == "concepts-plan" else {"content": "Summary."}
+        ),
+    )
+    monkeypatch.setattr(
+        compiler, "_llm_call_page_async", AsyncMock(return_value='{"note": "New note."}')
+    )
+
+    result = _invoke(kb_dir, ["recompile", "notes.md"])
+
+    assert result.exit_code == 0, result.output
+    assert "recompiled 1" in result.output
+    preview = _invoke(kb_dir, ["consolidate", "--all", "--min-notes", "1", "--dry-run"])
+    assert preview.exit_code == 0, preview.output
+    for topic in topics:
+        assert f"{topic.parent.name}/topic  (1 note(s))" in preview.output
+        text = topic.read_text(encoding="utf-8")
+        assert f"{closed_example}\n\n## Notes\n\n" in text
+        assert text.endswith("New note. ([[summaries/notes-h_s]])")
+
+
 # ---------------------------------------------------------------------------
 # long-doc dispatch
 # ---------------------------------------------------------------------------

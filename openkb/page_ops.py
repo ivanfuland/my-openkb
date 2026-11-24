@@ -1,11 +1,10 @@
 """Wiki-page mutations for the Workbench: delete a concept/entity page.
 
-Reuses the compile/lint machinery so a deletion degrades cleanly rather than
-leaving dangling references:
+Reuses the compile/lint machinery to clean up references after deletion.
 
-- inbound ``[[wikilinks]]`` in other pages are demoted to plain text
-  (``lint.fix_broken_links``), not left pointing at a gone page;
-- the page's ``index.md`` entry (itself a ``[[wikilink]]`` line) is removed
+- Inbound ``[[wikilinks]]`` in other pages go through
+  :func:`lint.fix_broken_links`.
+- The page's ``index.md`` entry (itself a ``[[wikilink]]`` line) is removed
   outright (``compiler.remove_doc_from_index``).
 
 All writes run under the KB ingest lock (crash-safe serial mutation, matching
@@ -196,10 +195,10 @@ def edit_wiki_page(kb_dir: Path, path: str, content: str) -> dict:
 
     The ``type:``/``description:``/``sources:`` frontmatter is code-managed, so
     any frontmatter in the incoming ``content`` is discarded and the existing
-    block is re-attached verbatim. Dead ``[[wikilinks]]`` the user typed are
-    demoted to plain text on save (OpenKB keeps the wiki free of broken links);
-    the demoted targets are returned so the UI can warn. Write is atomic, under
-    the KB ingest lock. Returns ``status`` ``not_found`` when the page is absent.
+    block is re-attached verbatim. The new body goes through
+    :func:`strip_ghost_wikilinks`. The API returns the demoted targets so the
+    UI can warn. Write is atomic, under the KB ingest lock. Returns
+    ``status`` ``not_found`` when the page is absent.
     """
     section, stem = validate_page_ref(path)
     wiki = kb_dir / "wiki"
