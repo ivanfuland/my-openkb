@@ -4,3 +4,7 @@ commands:
   lint: "uv run --locked --extra dev --extra api --python 3.12 ruff check . && uv run --locked --extra dev --extra api --python 3.12 ruff format --check . && uv run --locked --extra dev --extra api --python 3.12 mypy openkb"
   format: "uv run --locked --extra dev --extra api --python 3.12 ruff format ."
   test: "uv run --locked --extra dev --extra api --python 3.12 pytest"
+gates:
+  - name: preflight-lint
+    after: rebase
+    command: "${MY_HOME:-$HOME/my-home}/bin/myhome-preflight-lint"
