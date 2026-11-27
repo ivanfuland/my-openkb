@@ -1,9 +1,8 @@
 name: CI
 
+# Automatic GitHub Actions CI is disabled in favor of local no-mistakes gates.
 on:
-  push:
-    branches: ["main"]
-  pull_request:
+  workflow_dispatch:
 
 # Least-privilege token: this workflow only reads the repo. Arbitrary
 # dependency build code runs during install, so never expose a writable
@@ -11,8 +10,7 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref (rapid PR pushes) instead of
-# letting them pile up and post stale statuses.
+# Cancel superseded runs on the same ref.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -56,9 +54,7 @@ jobs:
       - name: Pytest
         run: uv run --no-sync pytest
 
-  # Build the Workbench SPA so a broken frontend (vite/config error, stale
-  # package-lock, JS error) is caught here at PR time rather than only in
-  # publish.yml after a release tag is pushed. Mirrors the release build step.
+  # Check the Workbench SPA build on manual runs. Mirrors the release build step.
   web:
     runs-on: ubuntu-latest
     steps:

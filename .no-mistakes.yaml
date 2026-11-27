@@ -1,4 +1,6 @@
 # Canonical project checks for my-openkb (aligned with .github/workflows/ci.yml).
+# CI runs locally through no-mistakes. GitHub Actions CI is manual only.
+no_ci: true
 commands:
   prepare: "uv sync --locked --extra dev --extra api --python 3.12"
   lint: "uv run --locked --extra dev --extra api --python 3.12 ruff check . && uv run --locked --extra dev --extra api --python 3.12 ruff format --check . && uv run --locked --extra dev --extra api --python 3.12 mypy openkb"
